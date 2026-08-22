@@ -38,6 +38,15 @@ let scoreRefreshQueued = false
 
 const sessionId = Number(route.params.id)
 const latestScore = computed(() => scores.value[scores.value.length - 1] || null)
+const isTrainingMode = computed(() => session.value?.mode !== 'mock')
+const modeLabel = computed(() => isTrainingMode.value ? '训练模式' : '实战模式')
+const interviewTypeLabel = computed(() => ({
+  mixed: '综合面试',
+  hr: 'HR 面试',
+  project_deep_dive: '项目深挖',
+  technical_basics: '技术基础',
+  system_design: '系统设计'
+}[session.value?.interview_type || 'mixed']))
 const mobileScoreLabel = computed(() => latestScore.value
   ? `实时评分，已完成 ${scores.value.length} 轮评分，最新 ${latestScore.value.score} 分`
   : '实时评分，完成作答后查看反馈')
@@ -110,6 +119,7 @@ async function scrollToBottom() {
 }
 
 async function loadScores() {
+  if (!isTrainingMode.value) return
   if (scoresLoading.value) {
     scoreRefreshQueued = true
     return
@@ -134,7 +144,7 @@ async function load() {
     const remembered = takeRememberedInterview(sessionId)
     const data = remembered || (await fetchInterview(sessionId)).data
     session.value = data
-    void loadScores()
+    if (data.mode === 'training') void loadScores()
     await scrollToBottom()
     if (data.status === 'preparing' || (data.status === 'active' && data.messages.length === 0)) {
       await startFirstQuestion()
@@ -249,7 +259,7 @@ async function submitAnswer() {
         pendingUserMessage.value = null
         streamingAssistantMessage.value = null
         retryableAnswer.value = null
-        void loadScores()
+        if (isTrainingMode.value) void loadScores()
       } else if (event.event === 'error') {
         throw new Error(event.data.message)
       }
@@ -297,7 +307,11 @@ async function finish() {
       <header class="chat-header">
         <div>
           <h1>{{ session.target_position }}</h1>
-          <p>{{ headerStatusLabel }} · {{ latestQuestionLabel }}</p>
+          <div class="session-context" aria-label="当前面试设置">
+            <el-tag :type="isTrainingMode ? 'primary' : 'warning'" effect="light" size="small">{{ modeLabel }}</el-tag>
+            <el-tag type="info" effect="plain" size="small">{{ interviewTypeLabel }}</el-tag>
+            <span>{{ headerStatusLabel }} · {{ latestQuestionLabel }}</span>
+          </div>
         </div>
         <div class="chat-actions">
           <el-button v-if="canAnswer" :loading="finishing" @click="finish">结束面试</el-button>
@@ -324,7 +338,7 @@ async function finish() {
         </div>
       </section>
 
-      <details class="mobile-score-disclosure">
+      <details v-if="isTrainingMode" class="mobile-score-disclosure">
         <summary :aria-label="mobileScoreLabel" aria-controls="mobile-live-score-panel">
           <span>
             <strong>实时评分</strong>
@@ -342,7 +356,7 @@ async function finish() {
         />
       </details>
 
-      <div class="interview-workspace">
+      <div class="interview-workspace" :class="{ 'mock-workspace': !isTrainingMode }">
         <div ref="chatBox" class="chat-box" role="log" aria-label="面试问答记录" aria-live="polite" aria-relevant="additions text" tabindex="0">
           <ChatMessage
             v-for="message in session.messages"
@@ -365,10 +379,11 @@ async function finish() {
             :streaming="!streamTextDone"
           />
           <div v-if="(starting || isPreparing) && !streamingAssistantMessage?.content" class="thinking-indicator" aria-live="polite"><span class="thinking-pulse" aria-hidden="true"></span>{{ preparationMessage }}</div>
-          <div v-else-if="loading && !streamingAssistantMessage?.content" class="thinking-indicator" role="status" aria-live="polite">AI 正在评分并生成下一步问题...</div>
+          <div v-else-if="loading && !streamingAssistantMessage?.content" class="thinking-indicator" role="status" aria-live="polite">{{ isTrainingMode ? 'AI 正在评估回答并生成下一步问题...' : 'AI 正在生成下一步问题...' }}</div>
         </div>
 
         <LiveScorePanel
+          v-if="isTrainingMode"
           class="desktop-live-score"
           :scores="scores"
           :loading="scoresLoading"

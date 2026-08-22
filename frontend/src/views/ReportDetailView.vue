@@ -1,18 +1,37 @@
 <script setup lang="ts">
-import { ElEmpty, ElMessage, ElTag, vLoading } from 'element-plus'
+import { ElButton, ElEmpty, ElMessage, ElTag, vLoading } from 'element-plus'
+import 'element-plus/theme-chalk/el-button.css'
 import 'element-plus/theme-chalk/el-empty.css'
 import 'element-plus/theme-chalk/el-loading.css'
 import 'element-plus/theme-chalk/el-message.css'
 import 'element-plus/theme-chalk/el-tag.css'
 import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { getApiErrorMessage } from '../api/client'
-import { fetchInterviewReport, fetchReport, type InterviewReport } from '../api/report'
+import { fetchInterviewScores, type InterviewScore } from '../api/interview'
+import {
+  createPracticeFromQuestionReview,
+  createPracticeFromReport,
+  type QuestionPracticeMode
+} from '../api/practice'
+import {
+  fetchInterviewQuestionReviews,
+  fetchInterviewReport,
+  fetchReport,
+  fetchReportQuestionReviews,
+  type InterviewReport,
+  type QuestionReview
+} from '../api/report'
 
 const route = useRoute()
+const router = useRouter()
 const report = ref<InterviewReport | null>(null)
+const questionReviews = ref<QuestionReview[]>([])
 const loading = ref(false)
+const reviewFallback = ref(false)
+const reviewUnavailable = ref(false)
+const practiceLoadingKey = ref('')
 
 const reportId = computed(() => Number(route.params.id))
 const sessionId = computed(() => Number(route.params.id))
@@ -31,6 +50,116 @@ function purposeLabel(purpose: string | null) {
   return labels[purpose || ''] || purpose || '知识检索'
 }
 
+function uniqueText(items: string[]) {
+  return [...new Set(items.map((item) => item.trim()).filter(Boolean))]
+}
+
+function toFallbackReviews(scores: InterviewScore[]) {
+  const latestByQuestion = new Map<number, InterviewScore>()
+  for (const score of scores) {
+    const previous = latestByQuestion.get(score.question_index)
+    if (!previous || score.id > previous.id) latestByQuestion.set(score.question_index, score)
+  }
+  return [...latestByQuestion.values()]
+    .map<QuestionReview>((score) => ({
+      id: score.id,
+      session_id: score.session_id,
+      score_id: score.id,
+      question_index: score.question_index,
+      dimension: score.dimension,
+      question: score.question,
+      answer: score.answer,
+      score: score.score,
+      sub_scores: score.sub_scores,
+      deduction_reasons: uniqueText([score.reason, ...score.weaknesses]),
+      suggested_structure: uniqueText(score.suggestions),
+      sample_answer: '',
+      weaknesses: uniqueText(score.weaknesses),
+      weakness_key: `question_${score.question_index}`,
+      created_at: score.created_at
+    }))
+    .sort((left, right) => left.question_index - right.question_index)
+}
+
+function reviewWeakness(review: QuestionReview) {
+  return review.weaknesses[0] || review.deduction_reasons[0] || `${review.dimension || '本题能力'}待提升`
+}
+
+function reviewWeaknessKey(review: QuestionReview) {
+  return review.weakness_key || review.practice_seed?.weakness_key || `question_${review.question_index}`
+}
+
+function reportWeaknessKey(index: number) {
+  return `report_weakness_${index + 1}`
+}
+
+function practiceKey(scope: string, index: number) {
+  return `${scope}:${index}`
+}
+
+async function startQuestionPractice(review: QuestionReview, mode: QuestionPracticeMode) {
+  if (!report.value) return
+  const loadingKey = practiceKey(mode, review.question_index)
+  practiceLoadingKey.value = loadingKey
+  try {
+    const { data } = await createPracticeFromQuestionReview({
+      report_id: report.value.id,
+      question_review_id: review.id,
+      score_id: review.score_id,
+      question_index: review.question_index,
+      weakness_key: reviewWeaknessKey(review),
+      weakness_title: reviewWeakness(review),
+      practice_mode: mode
+    })
+    ElMessage.success(mode === 'repeat_question' ? '已创建本题重练' : '已创建同类题专项练习')
+    if (data.practice_session_id) await router.push(`/interviews/${data.practice_session_id}`)
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '专项练习创建失败'))
+  } finally {
+    practiceLoadingKey.value = ''
+  }
+}
+
+async function startWeaknessPractice(weakness: string, index: number) {
+  if (!report.value) return
+  const loadingKey = practiceKey('weakness', index)
+  practiceLoadingKey.value = loadingKey
+  try {
+    const { data } = await createPracticeFromReport({
+      report_id: report.value.id,
+      weakness_key: reportWeaknessKey(index),
+      weakness_title: weakness
+    })
+    ElMessage.success('已根据该短板创建专项练习')
+    if (data.practice_session_id) await router.push(`/interviews/${data.practice_session_id}`)
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '专项练习创建失败'))
+  } finally {
+    practiceLoadingKey.value = ''
+  }
+}
+
+async function loadQuestionReviews(currentReport: InterviewReport) {
+  reviewFallback.value = false
+  reviewUnavailable.value = false
+  try {
+    const { data } = isSessionReport.value
+      ? await fetchInterviewQuestionReviews(currentReport.session_id)
+      : await fetchReportQuestionReviews(currentReport.id)
+    questionReviews.value = data
+  } catch {
+    try {
+      const { data } = await fetchInterviewScores(currentReport.session_id)
+      questionReviews.value = toFallbackReviews(data)
+      reviewFallback.value = questionReviews.value.length > 0
+      reviewUnavailable.value = questionReviews.value.length === 0
+    } catch {
+      questionReviews.value = []
+      reviewUnavailable.value = true
+    }
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -38,6 +167,7 @@ async function load() {
       ? await fetchInterviewReport(sessionId.value)
       : await fetchReport(reportId.value)
     report.value = data
+    await loadQuestionReviews(data)
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '报告加载失败'))
   } finally {
@@ -89,39 +219,121 @@ onMounted(load)
           </div>
         </section>
 
-        <section class="report-grid">
-          <div class="report-section">
-            <div class="report-section-title success"><span>03</span><h2>核心优势</h2></div>
-            <el-empty v-if="report.strengths.length === 0" description="暂无内容" />
-            <ul v-else class="report-list-text"><li v-for="item in report.strengths" :key="item">{{ item }}</li></ul>
-          </div>
-          <div class="report-section">
-            <div class="report-section-title warning"><span>04</span><h2>待提升项</h2></div>
-            <el-empty v-if="report.weaknesses.length === 0" description="暂无内容" />
-            <ul v-else class="report-list-text"><li v-for="item in report.weaknesses" :key="item">{{ item }}</li></ul>
+        <section class="report-section question-review-section">
+          <div class="report-section-title"><span>03</span><h2>逐题复盘</h2></div>
+          <p v-if="reviewFallback" class="review-notice">逐题复盘服务尚未返回完整内容，当前先展示可追溯的评分记录。</p>
+          <el-empty
+            v-if="questionReviews.length === 0"
+            :description="reviewUnavailable ? '暂时无法加载逐题复盘' : '暂无逐题复盘'"
+          />
+          <div v-else class="question-review-list">
+            <details
+              v-for="review in questionReviews"
+              :key="`${review.question_index}-${review.id}`"
+              class="question-review-card"
+            >
+              <summary>
+                <span class="question-review-index">第 {{ review.question_index }} 题</span>
+                <span class="question-review-summary">
+                  <strong>{{ review.question || '题目内容待补充' }}</strong>
+                  <small>{{ review.dimension || '综合能力' }}</small>
+                </span>
+                <span class="question-review-score">{{ review.score }} 分</span>
+                <span class="question-review-chevron" aria-hidden="true"></span>
+              </summary>
+
+              <div class="question-review-content">
+                <div class="review-copy-block">
+                  <h3>原回答</h3>
+                  <p>{{ review.answer || '本题未记录有效回答。' }}</p>
+                </div>
+
+                <div class="question-review-grid">
+                  <div class="review-copy-block review-deduction">
+                    <h3>扣分原因</h3>
+                    <ul v-if="review.deduction_reasons.length">
+                      <li v-for="item in review.deduction_reasons" :key="item">{{ item }}</li>
+                    </ul>
+                    <p v-else>本题暂无明确扣分记录。</p>
+                  </div>
+                  <div class="review-copy-block review-structure">
+                    <h3>建议结构</h3>
+                    <ol v-if="review.suggested_structure.length">
+                      <li v-for="item in review.suggested_structure" :key="item">{{ item }}</li>
+                    </ol>
+                    <p v-else>建议按“背景与目标 → 关键行动与取舍 → 结果与复盘”组织真实经历。</p>
+                  </div>
+                </div>
+
+                <div class="review-copy-block review-sample">
+                  <h3>示范回答</h3>
+                  <p v-if="review.sample_answer">{{ review.sample_answer }}</p>
+                  <p v-else class="review-placeholder">逐题示范回答待复盘服务生成；请不要直接套用报告级示例，以免引入未经你确认的经历或数据。</p>
+                </div>
+
+                <div class="question-practice-actions">
+                  <el-button
+                    :loading="practiceLoadingKey === practiceKey('repeat_question', review.question_index)"
+                    :disabled="Boolean(practiceLoadingKey)"
+                    @click="startQuestionPractice(review, 'repeat_question')"
+                  >重练这题</el-button>
+                  <el-button
+                    type="primary"
+                    :loading="practiceLoadingKey === practiceKey('similar_question', review.question_index)"
+                    :disabled="Boolean(practiceLoadingKey)"
+                    @click="startQuestionPractice(review, 'similar_question')"
+                  >练同类题</el-button>
+                </div>
+              </div>
+            </details>
           </div>
         </section>
 
         <section class="report-grid">
           <div class="report-section">
-            <div class="report-section-title"><span>05</span><h2>优化建议</h2></div>
+            <div class="report-section-title success"><span>04</span><h2>核心优势</h2></div>
+            <el-empty v-if="report.strengths.length === 0" description="暂无内容" />
+            <ul v-else class="report-list-text"><li v-for="item in report.strengths" :key="item">{{ item }}</li></ul>
+          </div>
+          <div class="report-section">
+            <div class="report-section-title warning"><span>05</span><h2>待提升项</h2></div>
+            <el-empty v-if="report.weaknesses.length === 0" description="暂无内容" />
+            <ul v-else class="report-list-text weakness-practice-list">
+              <li v-for="(item, index) in report.weaknesses" :key="item">
+                <span>{{ item }}</span>
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :loading="practiceLoadingKey === practiceKey('weakness', index)"
+                  :disabled="Boolean(practiceLoadingKey)"
+                  @click="startWeaknessPractice(item, index)"
+                >专项练习</el-button>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="report-grid">
+          <div class="report-section">
+            <div class="report-section-title"><span>06</span><h2>优化建议</h2></div>
             <el-empty v-if="report.suggestions.length === 0" description="暂无内容" />
             <ul v-else class="report-list-text"><li v-for="item in report.suggestions" :key="item">{{ item }}</li></ul>
           </div>
           <div class="report-section">
-            <div class="report-section-title"><span>06</span><h2>学习路线</h2></div>
+            <div class="report-section-title"><span>07</span><h2>学习路线</h2></div>
             <el-empty v-if="report.learning_path.length === 0" description="暂无内容" />
             <ul v-else class="report-list-text"><li v-for="item in report.learning_path" :key="item">{{ item }}</li></ul>
           </div>
         </section>
 
         <section class="report-section">
-          <div class="report-section-title"><span>07</span><h2>示范回答</h2></div>
+          <div class="report-section-title"><span>08</span><h2>报告示例回答</h2></div>
           <p class="sample-answer">{{ report.sample_answer || '暂无示范回答' }}</p>
         </section>
 
         <section class="report-section">
-          <div class="report-section-title"><span>08</span><h2>知识来源</h2></div>
+          <div class="report-section-title"><span>09</span><h2>知识来源</h2></div>
           <el-empty v-if="report.citations.length === 0" description="该报告生成时未记录知识来源" />
           <div v-else class="citation-list">
             <article
