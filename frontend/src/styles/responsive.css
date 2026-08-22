@@ -59,6 +59,10 @@
     flex-direction: column;
   }
 
+  .comparison-score-card {
+    grid-template-columns: 1fr;
+  }
+
   .overview-metrics {
     width: 100%;
   }
@@ -467,6 +471,24 @@
     padding: 20px 0 32px;
   }
 
+  .weakness-comparison-grid,
+  .answer-comparison-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .answer-comparison-grid article > p {
+    min-height: auto;
+  }
+
+  .comparison-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .comparison-actions .el-button {
+    width: 100%;
+  }
+
   .dashboard-page {
     padding-top: 20px;
   }
@@ -840,6 +862,68 @@
   .section-header > .el-button {
     width: 100%;
     margin: 0;
+  }
+
+  .comparison-heading > .el-button {
+    width: 100%;
+    margin: 0;
+  }
+
+  .comparison-score-card,
+  .comparison-section,
+  .comparison-actions {
+    padding: 16px;
+  }
+
+  .score-comparison {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  }
+
+  .score-comparison button,
+  .pending-score {
+    min-height: 108px;
+    padding: 8px;
+  }
+
+  .score-delta {
+    min-height: 72px;
+    grid-column: 1 / -1;
+  }
+
+  .structure-row {
+    grid-template-columns: 1fr;
+  }
+
+  .structure-row > * + * {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .structure-head {
+    display: none;
+  }
+
+  .structure-row p::before {
+    grid-column: 1 / -1;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .structure-row p:first-child::before {
+    content: "原回答结构";
+  }
+
+  .structure-row p:last-child::before {
+    content: "再测回答结构";
+  }
+
+  .sub-score-row {
+    grid-template-columns: minmax(100px, 1fr) repeat(3, minmax(50px, 0.5fr));
+  }
+
+  .sub-score-row > * {
+    padding: 10px 6px;
   }
 
   .session-item {

@@ -1,5 +1,9 @@
 import { apiClient, authenticatedFetch } from './client'
 
+export type InterviewMode = 'training' | 'mock'
+export type InterviewType = 'hr' | 'project_deep_dive' | 'technical_basics' | 'system_design' | 'mixed'
+export type InterviewPurpose = 'full_interview' | 'weakness_practice' | 'retest'
+
 export interface InterviewMessage {
   id: number
   role: 'assistant' | 'user'
@@ -19,6 +23,13 @@ export interface InterviewSession {
   current_dimension?: string | null
   current_plan_focus?: string | null
   total_question_count: number
+  mode: InterviewMode
+  interview_type: InterviewType
+  session_purpose?: InterviewPurpose
+  practice_id?: number | null
+  source_practice_id?: number | null
+  source_report_id?: number | null
+  source_weakness_key?: string | null
   created_at: string
   updated_at: string
   messages: InterviewMessage[]
@@ -41,10 +52,57 @@ export interface InterviewScore {
   created_at: string
 }
 
+export interface InterviewCreateInput {
+  target_position: string
+  difficulty: 'easy' | 'medium' | 'hard'
+  mode: InterviewMode
+  interview_type: InterviewType
+  resume_id?: number
+  job_description_id?: number
+}
+
 const sessionCache = new Map<number, InterviewSession>()
+const sessionPreferencePrefix = 'interview-session-preferences:'
+
+type InterviewPreferences = Pick<InterviewSession, 'mode' | 'interview_type'>
+
+function readInterviewPreferences(id: number): Partial<InterviewPreferences> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const value = window.localStorage.getItem(`${sessionPreferencePrefix}${id}`)
+    return value ? JSON.parse(value) as Partial<InterviewPreferences> : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeInterviewPreferences(session: InterviewSession) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(`${sessionPreferencePrefix}${session.id}`, JSON.stringify({
+      mode: session.mode,
+      interview_type: session.interview_type
+    }))
+  } catch {
+    // Storage can be unavailable in privacy mode; the in-memory cache still covers navigation.
+  }
+}
+
+export function normalizeInterviewSession(
+  session: Omit<InterviewSession, 'mode' | 'interview_type'> & Partial<InterviewPreferences>,
+  fallback: Partial<InterviewPreferences> = {}
+): InterviewSession {
+  const stored = readInterviewPreferences(session.id)
+  return {
+    ...session,
+    mode: session.mode || fallback.mode || stored.mode || 'training',
+    interview_type: session.interview_type || fallback.interview_type || stored.interview_type || 'mixed'
+  }
+}
 
 export function rememberInterview(session: InterviewSession) {
   sessionCache.set(session.id, session)
+  writeInterviewPreferences(session)
 }
 
 export function takeRememberedInterview(id: number) {
@@ -57,16 +115,21 @@ export function warmupInterview(targetPosition: string) {
   return apiClient.post<void>('/interviews/warmup', { target_position: targetPosition })
 }
 
-export function createInterview(data: { target_position: string; difficulty: string }) {
-  return apiClient.post<InterviewSession>('/interviews', data)
+export async function createInterview(data: InterviewCreateInput) {
+  const response = await apiClient.post<InterviewSession>('/interviews', data)
+  const session = normalizeInterviewSession(response.data, data)
+  writeInterviewPreferences(session)
+  return { ...response, data: session }
 }
 
-export function fetchInterviews() {
-  return apiClient.get<InterviewSession[]>('/interviews')
+export async function fetchInterviews() {
+  const response = await apiClient.get<InterviewSession[]>('/interviews')
+  return { ...response, data: response.data.map((session) => normalizeInterviewSession(session)) }
 }
 
-export function fetchInterview(id: number) {
-  return apiClient.get<InterviewSession>(`/interviews/${id}`)
+export async function fetchInterview(id: number) {
+  const response = await apiClient.get<InterviewSession>(`/interviews/${id}`)
+  return { ...response, data: normalizeInterviewSession(response.data) }
 }
 
 export function fetchInterviewScores(id: number) {
@@ -176,5 +239,7 @@ function parseSseFrame(frame: string): InterviewStreamEvent | null {
     if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart())
   }
   if (dataLines.length === 0) return null
-  return { event, data: JSON.parse(dataLines.join('\n')) } as InterviewStreamEvent
+  const parsed = { event, data: JSON.parse(dataLines.join('\n')) } as InterviewStreamEvent
+  if (parsed.event === 'complete') parsed.data = normalizeInterviewSession(parsed.data)
+  return parsed
 }
