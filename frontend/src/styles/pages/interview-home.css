@@ -314,12 +314,77 @@
 
 .interview-form .el-segmented {
   width: 100%;
+  --el-segmented-item-selected-color: var(--primary);
   --el-segmented-item-selected-bg-color: #fff;
 }
 
 .interview-form .el-segmented__group {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
+}
+
+.interview-form .mode-selector .el-segmented__group {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.interview-type-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.interview-type-option {
+  position: relative;
+  min-width: 0;
+  min-height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 6px 4px;
+  color: var(--text);
+  text-align: center;
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.interview-type-option:hover {
+  border-color: #93c5fd;
+}
+
+.interview-type-option.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: #93c5fd;
+  font-weight: 700;
+}
+
+.interview-type-option:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.interview-type-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.setting-hint {
+  margin: -10px 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.mock-mode-hint {
+  color: var(--warning);
 }
 
 .difficulty-hint {
@@ -396,8 +461,36 @@
 }
 
 .session-main small {
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1023px) {
+  .dashboard {
+    grid-template-columns: minmax(0, 1fr) 340px;
+  }
+}
+
+@media (max-width: 900px) {
+  .overview-metrics {
+    width: 100%;
+  }
+
+  .overview-metrics div {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .dashboard {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .history-panel {
+    min-width: 0;
+  }
 }
 
 @media (max-width: 767px) {
@@ -415,9 +508,18 @@
     min-height: 44px;
     margin: 0;
   }
+
 }
 
 @media (max-width: 480px) {
+  .interview-type-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .interview-type-option:last-child {
+    grid-column: 1 / -1;
+  }
+
   .quick-start-heading {
     align-items: flex-start;
   }

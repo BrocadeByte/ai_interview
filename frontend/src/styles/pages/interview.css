@@ -26,6 +26,20 @@
   font-size: 13px;
 }
 
+.session-context {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.session-context > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .chat-actions {
   display: flex;
   gap: 8px;
@@ -83,6 +97,10 @@
   grid-template-columns: minmax(0, 1fr) 320px;
   gap: 16px;
   align-items: stretch;
+}
+
+.interview-workspace.mock-workspace {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .live-score-panel {
@@ -398,4 +416,3 @@
   0%, 45% { opacity: 1; }
   46%, 100% { opacity: 0; }
 }
-

@@ -15,7 +15,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getApiErrorMessage } from '../api/client'
-import { createInterview, fetchInterviews, rememberInterview, type InterviewCreateInput, type InterviewSession, warmupInterview } from '../api/interview'
+import { createInterview, fetchInterviews, rememberInterview, type InterviewCreateInput, type InterviewSession, type InterviewType, warmupInterview } from '../api/interview'
 import { parseJobDescription } from '../api/jobDescription'
 import { autoGenerateProfile, fetchProfile, updateProfile, type AutoProfileDraft, type Profile } from '../api/profile'
 import { pasteResume, uploadResume } from '../api/resume'
@@ -25,9 +25,11 @@ const loading = ref(false)
 const preparingProfile = ref(false)
 const confirmingProfile = ref(false)
 const sessions = ref<InterviewSession[]>([])
-const form = reactive<{ target_position: string; difficulty: InterviewCreateInput['difficulty'] }>({
+const form = reactive<InterviewCreateInput>({
   target_position: '',
-  difficulty: 'medium'
+  difficulty: 'medium',
+  mode: 'training',
+  interview_type: 'mixed'
 })
 const currentProfile = ref<Profile>({})
 const resumeText = ref('')
@@ -38,6 +40,17 @@ const resumeId = ref<number | null>(null)
 const jobDescriptionId = ref<number | null>(null)
 const profileDraft = ref<AutoProfileDraft | null>(null)
 const profileConfirmed = ref(false)
+const modeOptions = [
+  { label: '训练模式', value: 'training' },
+  { label: '实战模式', value: 'mock' }
+]
+const interviewTypeOptions: Array<{ label: string; value: InterviewType }> = [
+  { label: '综合', value: 'mixed' },
+  { label: 'HR', value: 'hr' },
+  { label: '项目深挖', value: 'project_deep_dive' },
+  { label: '技术基础', value: 'technical_basics' },
+  { label: '系统设计', value: 'system_design' }
+]
 let warmupTimer: ReturnType<typeof setTimeout> | null = null
 let lastWarmedPosition = ''
 
@@ -66,6 +79,10 @@ const profileSummary = computed(() => {
   ].filter(Boolean)
   return parts.join('；') || '画像草稿已生成，请确认后开始训练。'
 })
+const modeHint = computed(() => form.mode === 'training'
+  ? '每次作答后显示实时评分和改进建议，适合边练边学。'
+  : '答题过程中不展示评分或即时提示，结束后统一查看复盘报告。')
+const startButtonLabel = computed(() => form.mode === 'mock' ? '开始实战模拟' : '开始训练')
 
 async function load() {
   const [{ data: profile }, { data: history }] = await Promise.all([fetchProfile(), fetchInterviews()])
@@ -248,6 +265,20 @@ function statusType(status: InterviewSession['status']) {
 function difficultyLabel(value: InterviewSession['difficulty']) {
   return { easy: '基础', medium: '标准', hard: '进阶' }[value]
 }
+
+function modeLabel(value: InterviewSession['mode']) {
+  return value === 'mock' ? '实战' : '训练'
+}
+
+function interviewTypeLabel(value: InterviewSession['interview_type']) {
+  return {
+    mixed: '综合',
+    hr: 'HR',
+    project_deep_dive: '项目深挖',
+    technical_basics: '技术基础',
+    system_design: '系统设计'
+  }[value]
+}
 </script>
 
 <template>
@@ -391,6 +422,28 @@ function difficultyLabel(value: InterviewSession['difficulty']) {
                 size="large"
               />
             </el-form-item>
+            <el-form-item label="面试模式">
+              <el-segmented
+                v-model="form.mode"
+                class="settings-selector mode-selector"
+                :options="modeOptions"
+                size="large"
+              />
+            </el-form-item>
+            <p class="setting-hint" :class="{ 'mock-mode-hint': form.mode === 'mock' }">{{ modeHint }}</p>
+            <el-form-item label="面试类型">
+              <div class="interview-type-grid" role="radiogroup" aria-label="面试类型">
+                <label
+                  v-for="option in interviewTypeOptions"
+                  :key="option.value"
+                  class="interview-type-option"
+                  :class="{ active: form.interview_type === option.value }"
+                >
+                  <input v-model="form.interview_type" type="radio" name="interview-type" :value="option.value" />
+                  <span>{{ option.label }}</span>
+                </label>
+              </div>
+            </el-form-item>
             <div class="difficulty-hint">
               <el-icon><Clock /></el-icon>
               <span>预计 20–30 分钟，共约 8 轮核心问答</span>
@@ -406,7 +459,7 @@ function difficultyLabel(value: InterviewSession['difficulty']) {
               size="large"
               class="start-button"
             >
-              开始训练<el-icon class="el-icon--right"><ArrowRight /></el-icon>
+              {{ startButtonLabel }}<el-icon class="el-icon--right"><ArrowRight /></el-icon>
             </el-button>
             </section>
           </el-form>
@@ -419,11 +472,11 @@ function difficultyLabel(value: InterviewSession['difficulty']) {
           </div>
           <el-empty v-if="sessions.length === 0" description="暂无训练记录" :image-size="72" />
           <div v-else class="session-list">
-            <button v-for="session in sessions.slice(0, 6)" :key="session.id" type="button" class="session-item" :aria-label="`${statusLabel(session.status)}：${session.target_position}，${difficultyLabel(session.difficulty)}难度，第 ${session.current_question_index} 轮`" @click="router.push(`/interviews/${session.id}`)">
+            <button v-for="session in sessions.slice(0, 6)" :key="session.id" type="button" class="session-item" :aria-label="`${statusLabel(session.status)}：${session.target_position}，${modeLabel(session.mode)}模式，${interviewTypeLabel(session.interview_type)}面试，${difficultyLabel(session.difficulty)}难度，第 ${session.current_question_index} 轮`" @click="router.push(`/interviews/${session.id}`)">
               <span class="session-icon">{{ session.target_position.slice(0, 1) }}</span>
               <span class="session-main">
                 <strong>{{ session.target_position }}</strong>
-                <small>{{ difficultyLabel(session.difficulty) }}难度 · 第 {{ session.current_question_index }} 轮</small>
+                <small>{{ modeLabel(session.mode) }} · {{ interviewTypeLabel(session.interview_type) }} · {{ difficultyLabel(session.difficulty) }}难度 · 第 {{ session.current_question_index }} 轮</small>
               </span>
               <el-tag :type="statusType(session.status)" effect="light" size="small">{{ statusLabel(session.status) }}</el-tag>
             </button>
