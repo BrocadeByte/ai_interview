@@ -3,6 +3,7 @@ from app.models.interview import InterviewMemory, InterviewMessage, InterviewSes
 from app.models.knowledge import KnowledgeDocument, KnowledgeIngestionTask, KnowledgeReindexJob
 from app.models.profile import UserProfile
 from app.models.report import InterviewReport
+from app.models.resume import Resume
 from app.models.score import InterviewScore
 from app.models.user import User
 
@@ -16,6 +17,7 @@ __all__ = [
     "KnowledgeDocument",
     "KnowledgeIngestionTask",
     "KnowledgeReindexJob",
+    "Resume",
     "User",
     "UserProfile",
 ]
