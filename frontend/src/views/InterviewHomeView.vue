@@ -1,33 +1,75 @@
 <script setup lang="ts">
-import { ArrowRight, Clock, MagicStick, Position } from '@element-plus/icons-vue'
-import { ElButton, ElEmpty, ElForm, ElFormItem, ElIcon, ElInput, ElMessage, ElSegmented, ElTag } from 'element-plus'
+import { ArrowRight, Briefcase, CircleCheck, Clock, Document, MagicStick, Position, UploadFilled } from '@element-plus/icons-vue'
+import { ElButton, ElEmpty, ElForm, ElFormItem, ElIcon, ElInput, ElMessage, ElProgress, ElSegmented, ElTag } from 'element-plus'
 import 'element-plus/theme-chalk/el-button.css'
 import 'element-plus/theme-chalk/el-empty.css'
 import 'element-plus/theme-chalk/el-form.css'
 import 'element-plus/theme-chalk/el-icon.css'
 import 'element-plus/theme-chalk/el-input.css'
 import 'element-plus/theme-chalk/el-message.css'
+import 'element-plus/theme-chalk/el-progress.css'
 import 'element-plus/theme-chalk/el-segmented.css'
 import 'element-plus/theme-chalk/el-tag.css'
+import '../styles/pages/interview-home.css'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getApiErrorMessage } from '../api/client'
-import { createInterview, fetchInterviews, rememberInterview, type InterviewSession, warmupInterview } from '../api/interview'
-import { fetchProfile } from '../api/profile'
+import { createInterview, fetchInterviews, rememberInterview, type InterviewCreateInput, type InterviewSession, warmupInterview } from '../api/interview'
+import { parseJobDescription } from '../api/jobDescription'
+import { autoGenerateProfile, fetchProfile, updateProfile, type AutoProfileDraft, type Profile } from '../api/profile'
+import { pasteResume, uploadResume } from '../api/resume'
 
 const router = useRouter()
 const loading = ref(false)
+const preparingProfile = ref(false)
+const confirmingProfile = ref(false)
 const sessions = ref<InterviewSession[]>([])
-const form = reactive({ target_position: '', difficulty: 'medium' })
+const form = reactive<{ target_position: string; difficulty: InterviewCreateInput['difficulty'] }>({
+  target_position: '',
+  difficulty: 'medium'
+})
+const currentProfile = ref<Profile>({})
+const resumeText = ref('')
+const jobDescriptionText = ref('')
+const selectedResumeFile = ref<File | null>(null)
+const resumeFileInput = ref<HTMLInputElement | null>(null)
+const resumeId = ref<number | null>(null)
+const jobDescriptionId = ref<number | null>(null)
+const profileDraft = ref<AutoProfileDraft | null>(null)
+const profileConfirmed = ref(false)
 let warmupTimer: ReturnType<typeof setTimeout> | null = null
 let lastWarmedPosition = ''
 
 const finishedCount = computed(() => sessions.value.filter((session) => session.status === 'finished').length)
 const activeCount = computed(() => sessions.value.filter((session) => session.status !== 'finished').length)
+const hasResume = computed(() => Boolean(selectedResumeFile.value || resumeText.value.trim() || resumeId.value))
+const hasJobDescription = computed(() => Boolean(jobDescriptionText.value.trim() || jobDescriptionId.value))
+const profileConfirmationRequired = computed(() => hasResume.value || hasJobDescription.value)
+const trainingKind = computed(() => {
+  if (hasResume.value && hasJobDescription.value) return { label: '岗位匹配训练', type: 'success' as const, hint: '将结合你的真实经历和目标岗位要求定制问题。' }
+  if (hasResume.value) return { label: '简历定制训练', type: 'primary' as const, hint: '将围绕你的技能与项目经历进行深挖。' }
+  if (hasJobDescription.value) return { label: 'JD 定制训练', type: 'warning' as const, hint: '将按目标岗位要求定制问题，补充简历后会更精准。' }
+  return { label: '通用训练', type: 'info' as const, hint: '无需简历也可开始，问题将按目标岗位和难度生成。' }
+})
+const completeness = computed(() => Math.min(100, Math.max(0, profileDraft.value?.completeness || 0)))
+const profileSummary = computed(() => {
+  const draft = profileDraft.value
+  if (!draft) return ''
+  if (draft.auto_summary?.trim()) return draft.auto_summary.trim()
+  const patch = draft.profile_patch
+  const parts = [
+    patch.target_position ? `目标 ${patch.target_position}` : '',
+    patch.experience_years != null ? `${patch.experience_years} 年经验` : '',
+    patch.skills ? `技能：${patch.skills}` : '',
+    patch.self_evaluation || ''
+  ].filter(Boolean)
+  return parts.join('；') || '画像草稿已生成，请确认后开始训练。'
+})
 
 async function load() {
   const [{ data: profile }, { data: history }] = await Promise.all([fetchProfile(), fetchInterviews()])
+  currentProfile.value = profile
   form.target_position = profile.target_position || ''
   sessions.value = history
 }
@@ -48,9 +90,131 @@ onBeforeUnmount(() => {
   if (warmupTimer) clearTimeout(warmupTimer)
 })
 
+function invalidateGeneratedProfile(source: 'resume' | 'job-description') {
+  if (source === 'resume') resumeId.value = null
+  else jobDescriptionId.value = null
+  profileDraft.value = null
+  profileConfirmed.value = false
+}
+
+function onResumeTextInput() {
+  invalidateGeneratedProfile('resume')
+}
+
+function onJobDescriptionInput() {
+  invalidateGeneratedProfile('job-description')
+}
+
+function chooseResumeFile() {
+  resumeFileInput.value?.click()
+}
+
+function onResumeFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0] || null
+  if (!file) return
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  if (!extension || !['pdf', 'txt', 'md'].includes(extension)) {
+    ElMessage.warning('简历仅支持 PDF、TXT、MD 文件')
+    input.value = ''
+    return
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    ElMessage.warning('简历文件不能超过 10MB')
+    input.value = ''
+    return
+  }
+  selectedResumeFile.value = file
+  invalidateGeneratedProfile('resume')
+}
+
+function removeResumeFile() {
+  selectedResumeFile.value = null
+  if (resumeFileInput.value) resumeFileInput.value.value = ''
+  invalidateGeneratedProfile('resume')
+}
+
+async function generateProfileDraft() {
+  if (!profileConfirmationRequired.value) {
+    ElMessage.info('请先粘贴或上传简历，或粘贴目标岗位 JD')
+    return
+  }
+  preparingProfile.value = true
+  profileConfirmed.value = false
+  try {
+    let nextResumeId = resumeId.value
+    let nextJobDescriptionId = jobDescriptionId.value
+    let detectedPosition = form.target_position.trim()
+
+    if (!nextResumeId && selectedResumeFile.value) {
+      const { data } = await uploadResume(selectedResumeFile.value)
+      if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
+      nextResumeId = data.id
+      resumeId.value = data.id
+      if (!detectedPosition && data.profile_patch?.target_position) detectedPosition = data.profile_patch.target_position
+    } else if (!nextResumeId && resumeText.value.trim()) {
+      const { data } = await pasteResume({
+        title: `粘贴简历 ${new Date().toLocaleDateString('zh-CN')}`,
+        content: resumeText.value.trim()
+      })
+      if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
+      nextResumeId = data.id
+      resumeId.value = data.id
+      if (!detectedPosition && data.profile_patch?.target_position) detectedPosition = data.profile_patch.target_position
+    }
+
+    if (!nextJobDescriptionId && jobDescriptionText.value.trim()) {
+      const { data } = await parseJobDescription({
+        raw_text: jobDescriptionText.value.trim(),
+        title: detectedPosition || '目标岗位 JD'
+      })
+      nextJobDescriptionId = data.id
+      jobDescriptionId.value = data.id
+      const parsedPosition = data.target_position || data.parsed?.target_position || data.parsed_json?.target_position
+      if (!detectedPosition && parsedPosition) detectedPosition = parsedPosition
+    }
+
+    const { data: draft } = await autoGenerateProfile({
+      ...(nextResumeId ? { resume_id: nextResumeId } : {}),
+      ...(nextJobDescriptionId ? { job_description_id: nextJobDescriptionId } : {}),
+      ...(detectedPosition ? { target_position: detectedPosition } : {})
+    })
+    profileDraft.value = { ...draft, warnings: draft.warnings || [] }
+    const draftPosition = draft.profile_patch.target_position?.trim() || detectedPosition
+    if (draftPosition) form.target_position = draftPosition
+    ElMessage.success('自动画像草稿已生成')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : getApiErrorMessage(error, '画像生成失败，请检查输入后重试'))
+  } finally {
+    preparingProfile.value = false
+  }
+}
+
+async function confirmGeneratedProfile() {
+  if (!profileDraft.value) return
+  confirmingProfile.value = true
+  try {
+    const { id: _id, user_id: _userId, ...profileFields } = currentProfile.value
+    const payload: Profile = { ...profileFields, ...profileDraft.value.profile_patch }
+    const { data } = await updateProfile(payload)
+    currentProfile.value = data
+    profileConfirmed.value = true
+    if (data.target_position) form.target_position = data.target_position
+    ElMessage.success('画像已确认，将用于本次训练')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '画像确认失败，请重试'))
+  } finally {
+    confirmingProfile.value = false
+  }
+}
+
 async function startInterview() {
   if (!form.target_position.trim()) {
     ElMessage.warning('请先填写目标岗位')
+    return
+  }
+  if (profileConfirmationRequired.value && !profileConfirmed.value) {
+    ElMessage.warning(profileDraft.value ? '请先确认自动画像' : '请先生成并确认自动画像')
     return
   }
   loading.value = true
@@ -58,7 +222,12 @@ async function startInterview() {
     const normalizedPosition = form.target_position.trim()
     void import('./InterviewChatView.vue')
     void warmupInterview(normalizedPosition).catch(() => undefined)
-    const { data } = await createInterview({ ...form, target_position: normalizedPosition })
+    const { data } = await createInterview({
+      ...form,
+      target_position: normalizedPosition,
+      ...(resumeId.value ? { resume_id: resumeId.value } : {}),
+      ...(jobDescriptionId.value ? { job_description_id: jobDescriptionId.value } : {})
+    })
     rememberInterview(data)
     await router.push(`/interviews/${data.id}`)
   } catch (error) {
@@ -102,13 +271,118 @@ function difficultyLabel(value: InterviewSession['difficulty']) {
           <div class="panel-title-row">
             <span class="section-icon"><el-icon><MagicStick /></el-icon></span>
             <div>
-              <h2>训练设置</h2>
-              <p>选择你的目标技术岗位与训练强度</p>
+              <h2>三分钟开始训练</h2>
+              <p>补充简历与 JD，先确认 AI 生成的求职画像</p>
             </div>
           </div>
           <el-form label-position="top" class="interview-form" @submit.prevent="startInterview">
+            <section class="quick-start-section" aria-labelledby="quick-start-heading">
+              <div class="quick-start-heading">
+                <div>
+                  <span class="step-label">第 1 步</span>
+                  <h3 id="quick-start-heading">简历 / JD / 自动画像</h3>
+                </div>
+                <el-tag :type="trainingKind.type" effect="light">{{ trainingKind.label }}</el-tag>
+              </div>
+              <p class="training-kind-hint">{{ trainingKind.hint }}</p>
+
+              <div class="customization-grid">
+                <article class="source-card">
+                  <div class="source-card-heading">
+                    <span class="source-icon"><el-icon><Document /></el-icon></span>
+                    <div><h4>我的简历</h4><p>粘贴文本或上传文件，任选一种</p></div>
+                  </div>
+                  <el-input
+                    v-model="resumeText"
+                    type="textarea"
+                    :rows="5"
+                    maxlength="20000"
+                    resize="vertical"
+                    placeholder="粘贴教育背景、技能和项目经历…"
+                    aria-label="粘贴简历文本"
+                    @input="onResumeTextInput"
+                  />
+                  <div class="file-picker-row">
+                    <input
+                      ref="resumeFileInput"
+                      class="native-file-input"
+                      type="file"
+                      accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown"
+                      aria-label="上传简历文件"
+                      @change="onResumeFileChange"
+                    />
+                    <el-button :icon="UploadFilled" :disabled="preparingProfile" @click="chooseResumeFile">选择简历文件</el-button>
+                    <span v-if="!selectedResumeFile" class="file-help">PDF / TXT / MD，最大 10MB</span>
+                    <span v-else class="selected-file" :title="selectedResumeFile.name">
+                      {{ selectedResumeFile.name }}
+                      <button type="button" aria-label="移除已选简历文件" @click="removeResumeFile">移除</button>
+                    </span>
+                  </div>
+                </article>
+
+                <article class="source-card">
+                  <div class="source-card-heading">
+                    <span class="source-icon source-icon-job"><el-icon><Briefcase /></el-icon></span>
+                    <div><h4>目标岗位 JD</h4><p>粘贴职责、任职要求和加分项</p></div>
+                  </div>
+                  <el-input
+                    v-model="jobDescriptionText"
+                    type="textarea"
+                    :rows="5"
+                    maxlength="20000"
+                    resize="vertical"
+                    placeholder="粘贴目标岗位的完整职位描述…"
+                    aria-label="粘贴目标岗位 JD"
+                    @input="onJobDescriptionInput"
+                  />
+                  <p class="source-help">JD 会作为不可信数据解析，不会被当作系统指令执行。</p>
+                </article>
+              </div>
+
+              <el-button
+                type="primary"
+                plain
+                size="large"
+                class="generate-profile-button"
+                :loading="preparingProfile"
+                :disabled="!profileConfirmationRequired || confirmingProfile"
+                @click="generateProfileDraft"
+              >
+                {{ profileDraft ? '重新生成自动画像' : '生成自动画像' }}
+              </el-button>
+
+              <div v-if="profileDraft" class="profile-preview" aria-live="polite">
+                <div class="profile-preview-heading">
+                  <div><span class="step-label">第 2 步</span><h3>确认自动画像</h3></div>
+                  <span class="completeness-label">完整度 {{ completeness }}%</span>
+                </div>
+                <el-progress :percentage="completeness" :stroke-width="8" :show-text="false" />
+                <p class="profile-summary">{{ profileSummary }}</p>
+                <ul v-if="profileDraft.warnings.length" class="profile-warnings">
+                  <li v-for="warning in profileDraft.warnings" :key="warning">{{ warning }}</li>
+                </ul>
+                <div class="profile-confirm-row">
+                  <span v-if="profileConfirmed" class="confirmed-copy"><el-icon><CircleCheck /></el-icon>画像已确认</span>
+                  <span v-else>确认后才会写入求职画像并允许创建训练。</span>
+                  <el-button
+                    type="success"
+                    :loading="confirmingProfile"
+                    :disabled="profileConfirmed || preparingProfile"
+                    @click="confirmGeneratedProfile"
+                  >
+                    {{ profileConfirmed ? '已确认' : '确认并应用画像' }}
+                  </el-button>
+                </div>
+              </div>
+            </section>
+
+            <section class="training-settings" aria-labelledby="training-settings-heading">
+              <div class="settings-heading">
+                <span class="step-label">第 {{ profileConfirmationRequired ? 3 : 2 }} 步</span>
+                <h3 id="training-settings-heading">训练设置</h3>
+              </div>
             <el-form-item label="目标岗位">
-              <el-input v-model="form.target_position" placeholder="例如：前端开发工程师" :prefix-icon="Position" size="large" />
+              <el-input v-model="form.target_position" maxlength="160" placeholder="例如：前端开发工程师" :prefix-icon="Position" size="large" />
             </el-form-item>
             <el-form-item label="面试难度">
               <el-segmented
@@ -121,9 +395,20 @@ function difficultyLabel(value: InterviewSession['difficulty']) {
               <el-icon><Clock /></el-icon>
               <span>预计 20–30 分钟，共约 8 轮核心问答</span>
             </div>
-            <el-button type="primary" native-type="submit" :loading="loading" size="large" class="start-button">
+            <p v-if="profileConfirmationRequired && !profileConfirmed" class="start-blocked-hint">
+              {{ profileDraft ? '确认上方自动画像后即可开始训练。' : '生成并确认自动画像后即可开始训练。' }}
+            </p>
+            <el-button
+              type="primary"
+              native-type="submit"
+              :loading="loading"
+              :disabled="preparingProfile || confirmingProfile || (profileConfirmationRequired && !profileConfirmed)"
+              size="large"
+              class="start-button"
+            >
               开始训练<el-icon class="el-icon--right"><ArrowRight /></el-icon>
             </el-button>
+            </section>
           </el-form>
         </section>
 
