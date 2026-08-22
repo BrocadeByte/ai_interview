@@ -13,6 +13,7 @@
 | 面试聊天 | `/interviews/42` | `interview-desktop-1440x900.png` | `interview-mobile-390x844.png` |
 | 求职画像 | `/profile` | `profile-desktop-1440x900.png` | `profile-mobile-390x844.png` |
 | 历史报告 | `/reports` | `reports-desktop-1440x900.png` | `reports-mobile-390x844.png` |
+| 报告详情 | `/reports/23` | `report-detail-desktop-1440x900.png` | `report-detail-mobile-390x844.png` |
 | 知识库 | `/knowledge` | `knowledge-desktop-1440x900.png` | `knowledge-mobile-390x844.png` |
 
 ## 基线约定
