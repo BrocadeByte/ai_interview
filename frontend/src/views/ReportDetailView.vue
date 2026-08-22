@@ -295,7 +295,7 @@ onMounted(load)
             <el-empty v-if="report.strengths.length === 0" description="暂无内容" />
             <ul v-else class="report-list-text"><li v-for="item in report.strengths" :key="item">{{ item }}</li></ul>
           </div>
-          <div class="report-section">
+          <div id="weaknesses" class="report-section">
             <div class="report-section-title warning"><span>05</span><h2>待提升项</h2></div>
             <el-empty v-if="report.weaknesses.length === 0" description="暂无内容" />
             <ul v-else class="report-list-text weakness-practice-list">

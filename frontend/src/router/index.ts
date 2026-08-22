@@ -5,6 +5,7 @@ const InterviewChatView = () => import('../views/InterviewChatView.vue')
 const InterviewHomeView = () => import('../views/InterviewHomeView.vue')
 const KnowledgeAdminView = () => import('../views/KnowledgeAdminView.vue')
 const LoginView = () => import('../views/LoginView.vue')
+const PracticeComparisonView = () => import('../views/PracticeComparisonView.vue')
 const ProfileView = () => import('../views/ProfileView.vue')
 const RegisterView = () => import('../views/RegisterView.vue')
 const ReportDetailView = () => import('../views/ReportDetailView.vue')
@@ -24,6 +25,7 @@ const router = createRouter({
     { path: '/knowledge', component: KnowledgeAdminView, meta: { requiresAuth: true, requiresAdmin: true } },
     { path: '/interviews/:id', component: InterviewChatView, meta: { requiresAuth: true } },
     { path: '/interviews/:id/report', name: 'interview-report', component: ReportDetailView, meta: { requiresAuth: true } },
+    { path: '/practice/:id/comparison', name: 'practice-comparison', component: PracticeComparisonView, meta: { requiresAuth: true } },
     { path: '/reports', component: ReportHistoryView, meta: { requiresAuth: true } },
     { path: '/reports/:id', name: 'report-detail', component: ReportDetailView, meta: { requiresAuth: true } }
   ]

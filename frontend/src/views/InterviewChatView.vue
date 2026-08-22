@@ -111,6 +111,19 @@ const preparationMessage = computed(() => {
   return '正在准备面试环境...'
 })
 
+function comparisonPracticeId(data: InterviewSession) {
+  if (data.session_purpose !== 'retest' && route.query.practiceId == null) return null
+  const id = Number(route.query.practiceId ?? data.practice_id ?? data.source_practice_id)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+async function openComparisonAfterRetest(data: InterviewSession) {
+  const practiceId = comparisonPracticeId(data)
+  if (data.status !== 'finished' || !practiceId) return false
+  await router.replace({ name: 'practice-comparison', params: { id: practiceId } })
+  return true
+}
+
 async function scrollToBottom() {
   await nextTick()
   if (chatBox.value) {
@@ -144,6 +157,7 @@ async function load() {
     const remembered = takeRememberedInterview(sessionId)
     const data = remembered || (await fetchInterview(sessionId)).data
     session.value = data
+    if (await openComparisonAfterRetest(data)) return
     if (data.mode === 'training') void loadScores()
     await scrollToBottom()
     if (data.status === 'preparing' || (data.status === 'active' && data.messages.length === 0)) {
@@ -259,6 +273,7 @@ async function submitAnswer() {
         pendingUserMessage.value = null
         streamingAssistantMessage.value = null
         retryableAnswer.value = null
+        void openComparisonAfterRetest(event.data)
         if (isTrainingMode.value) void loadScores()
       } else if (event.event === 'error') {
         throw new Error(event.data.message)
@@ -284,6 +299,7 @@ async function finish() {
   try {
     const { data } = await finishInterview(sessionId)
     session.value = data
+    if (await openComparisonAfterRetest(data)) return
     await scrollToBottom()
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '结束面试失败'))

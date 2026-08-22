@@ -2,6 +2,7 @@ import { apiClient, authenticatedFetch } from './client'
 
 export type InterviewMode = 'training' | 'mock'
 export type InterviewType = 'hr' | 'project_deep_dive' | 'technical_basics' | 'system_design' | 'mixed'
+export type InterviewPurpose = 'full_interview' | 'weakness_practice' | 'retest'
 
 export interface InterviewMessage {
   id: number
@@ -24,6 +25,11 @@ export interface InterviewSession {
   total_question_count: number
   mode: InterviewMode
   interview_type: InterviewType
+  session_purpose?: InterviewPurpose
+  practice_id?: number | null
+  source_practice_id?: number | null
+  source_report_id?: number | null
+  source_weakness_key?: string | null
   created_at: string
   updated_at: string
   messages: InterviewMessage[]

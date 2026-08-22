@@ -23,6 +23,7 @@ const userInitial = computed(() => (auth.user?.username || auth.user?.email || '
 
 function isActive(path: string) {
   if (path === '/interviews') return route.path.startsWith('/interviews')
+  if (path === '/reports') return route.path.startsWith('/reports') || route.path.startsWith('/practice')
   return route.path === path || route.path.startsWith(`${path}/`)
 }
 
