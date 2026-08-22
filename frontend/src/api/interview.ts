@@ -41,6 +41,13 @@ export interface InterviewScore {
   created_at: string
 }
 
+export interface InterviewCreateInput {
+  target_position: string
+  difficulty: 'easy' | 'medium' | 'hard'
+  resume_id?: number
+  job_description_id?: number
+}
+
 const sessionCache = new Map<number, InterviewSession>()
 
 export function rememberInterview(session: InterviewSession) {
@@ -57,7 +64,7 @@ export function warmupInterview(targetPosition: string) {
   return apiClient.post<void>('/interviews/warmup', { target_position: targetPosition })
 }
 
-export function createInterview(data: { target_position: string; difficulty: string }) {
+export function createInterview(data: InterviewCreateInput) {
   return apiClient.post<InterviewSession>('/interviews', data)
 }
 
