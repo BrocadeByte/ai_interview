@@ -111,6 +111,7 @@ class InterviewState(TypedDict):
     parent_session_id: int | None
     source_report_id: int | None
     source_weakness_key: str | None
+    practice_context: dict[str, Any]
     session_purpose: InterviewPurpose
     comparison_group_id: str | None
     # 面试计划，通常由 interview_planner 节点生成。
@@ -154,6 +155,7 @@ def create_initial_state(
     parent_session_id: int | None = None,
     source_report_id: int | None = None,
     source_weakness_key: str | None = None,
+    practice_context: dict[str, Any] | None = None,
     session_purpose: InterviewPurpose = "full_interview",
     comparison_group_id: str | None = None,
 ) -> InterviewState:
@@ -175,6 +177,7 @@ def create_initial_state(
         "parent_session_id": parent_session_id,
         "source_report_id": source_report_id,
         "source_weakness_key": source_weakness_key,
+        "practice_context": practice_context or {},
         "session_purpose": session_purpose,
         "comparison_group_id": comparison_group_id,
         "interview_plan": [],

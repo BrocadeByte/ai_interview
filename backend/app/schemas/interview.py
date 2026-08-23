@@ -64,6 +64,8 @@ class InterviewSessionRead(BaseModel):
     source_weakness_key: str | None = None
     session_purpose: Literal["full_interview", "weakness_practice", "retest"] = "full_interview"
     comparison_group_id: str | None = None
+    practice_id: int | None = None
+    source_practice_id: int | None = None
     created_at: datetime
     updated_at: datetime
     messages: list[InterviewMessageRead] = []

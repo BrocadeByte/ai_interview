@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 import app.models  # noqa: F401
-from app.api import auth, interviews, job_descriptions, knowledge, knowledge_async, profiles, reports, resumes
+from app.api import auth, interviews, job_descriptions, knowledge, knowledge_async, practice, profiles, reports, resumes
 from app.core.config import settings
 from app.core.database import Base, engine
 from app.rag.embeddings import close_embedding_session
@@ -126,6 +126,7 @@ async def ensure_interview_session_columns(conn) -> None:
         "resume_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN resume_snapshot_json LONGTEXT NULL",
         "job_description_id": "ALTER TABLE interview_sessions ADD COLUMN job_description_id INT NULL",
         "job_description_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN job_description_snapshot_json LONGTEXT NULL",
+        "practice_context_json": "ALTER TABLE interview_sessions ADD COLUMN practice_context_json LONGTEXT NULL",
         "parent_session_id": "ALTER TABLE interview_sessions ADD COLUMN parent_session_id INT NULL",
         "source_report_id": "ALTER TABLE interview_sessions ADD COLUMN source_report_id INT NULL",
         "source_weakness_key": "ALTER TABLE interview_sessions ADD COLUMN source_weakness_key VARCHAR(255) NULL",
@@ -198,6 +199,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(interviews.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+app.include_router(practice.router, prefix="/api")
 app.include_router(resumes.router, prefix="/api")
 app.include_router(job_descriptions.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")

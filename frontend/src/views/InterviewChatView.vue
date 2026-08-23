@@ -10,8 +10,9 @@ import 'element-plus/theme-chalk/el-tag.css'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { fetchInterview, fetchInterviewScores, finishInterview, streamAnswer, streamInterviewStart, takeRememberedInterview, type InterviewMessage, type InterviewScore, type InterviewSession } from '../api/interview'
+import { fetchInterview, fetchInterviewScores, finishInterview, rememberInterview, streamAnswer, streamInterviewStart, takeRememberedInterview, type InterviewMessage, type InterviewScore, type InterviewSession } from '../api/interview'
 import { getApiErrorMessage } from '../api/client'
+import { startPracticeRetest } from '../api/practice'
 import ChatMessage from '../components/interview/ChatMessage.vue'
 import LiveScorePanel from '../components/interview/LiveScorePanel.vue'
 import { createRequestId } from '../utils/request-id'
@@ -111,15 +112,27 @@ const preparationMessage = computed(() => {
   return '正在准备面试环境...'
 })
 
-function comparisonPracticeId(data: InterviewSession) {
-  if (data.session_purpose !== 'retest' && route.query.practiceId == null) return null
+function linkedPracticeId(data: InterviewSession) {
+  if (!['weakness_practice', 'retest'].includes(data.session_purpose || '') && route.query.practiceId == null) return null
   const id = Number(route.query.practiceId ?? data.practice_id ?? data.source_practice_id)
   return Number.isInteger(id) && id > 0 ? id : null
 }
 
-async function openComparisonAfterRetest(data: InterviewSession) {
-  const practiceId = comparisonPracticeId(data)
+async function advancePracticeFlow(data: InterviewSession) {
+  const practiceId = linkedPracticeId(data)
   if (data.status !== 'finished' || !practiceId) return false
+  if (data.session_purpose === 'weakness_practice') {
+    try {
+      const { data: retest } = await startPracticeRetest(practiceId)
+      rememberInterview(retest)
+      await router.replace({ path: `/interviews/${retest.id}`, query: { practiceId: String(practiceId) } })
+      return true
+    } catch (error) {
+      ElMessage.error(getApiErrorMessage(error, '专项练习已完成，但启动再测失败'))
+      return false
+    }
+  }
+  if (data.session_purpose !== 'retest') return false
   await router.replace({ name: 'practice-comparison', params: { id: practiceId } })
   return true
 }
@@ -157,7 +170,7 @@ async function load() {
     const remembered = takeRememberedInterview(sessionId)
     const data = remembered || (await fetchInterview(sessionId)).data
     session.value = data
-    if (await openComparisonAfterRetest(data)) return
+    if (await advancePracticeFlow(data)) return
     if (data.mode === 'training') void loadScores()
     await scrollToBottom()
     if (data.status === 'preparing' || (data.status === 'active' && data.messages.length === 0)) {
@@ -273,7 +286,7 @@ async function submitAnswer() {
         pendingUserMessage.value = null
         streamingAssistantMessage.value = null
         retryableAnswer.value = null
-        void openComparisonAfterRetest(event.data)
+        void advancePracticeFlow(event.data)
         if (isTrainingMode.value) void loadScores()
       } else if (event.event === 'error') {
         throw new Error(event.data.message)
@@ -299,7 +312,7 @@ async function finish() {
   try {
     const { data } = await finishInterview(sessionId)
     session.value = data
-    if (await openComparisonAfterRetest(data)) return
+    if (await advancePracticeFlow(data)) return
     await scrollToBottom()
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '结束面试失败'))

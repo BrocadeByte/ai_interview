@@ -47,6 +47,7 @@ from app.services.llm_stream import (
     set_stream_text_done_callback,
 )
 from app.services.question_review_service import ensure_question_reviews
+from app.services.practice_service import attach_practice_fields, sync_practice_for_interview
 from app.services.score_service import list_scores, save_latest_score
 from app.rag.embeddings import embed_text
 from app.rag.retriever import ensure_collection
@@ -640,6 +641,7 @@ async def _process_answer(
             followup_index=followup_index,
         )
     )
+    await sync_practice_for_interview(db, session)
     await release_answer_lease(
         db,
         session_id=session.id,
@@ -696,6 +698,7 @@ async def finish_interview(
                 followup_index=0,
             )
         )
+        await sync_practice_for_interview(db, session)
         await release_answer_lease(
             db,
             session_id=session.id,
@@ -727,6 +730,7 @@ async def _process_start(
         result = await interview_graph.ainvoke(state)
         session.interview_plan_json = json.dumps(result.get("interview_plan") or [], ensure_ascii=False)
         session.status = "active"
+        await sync_practice_for_interview(db, session)
         question = _validated_visible_question(result["current_question"])
         db.add(
             InterviewMessage(
@@ -770,6 +774,7 @@ async def _load_session(db: AsyncSession, user_id: int, session_id: int) -> Inte
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview not found")
     attach_current_plan_fields(session)
+    await attach_practice_fields(db, session)
     return session
 
 

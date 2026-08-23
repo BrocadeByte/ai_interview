@@ -86,6 +86,7 @@ def build_state_from_session(
         parent_session_id=getattr(session, "parent_session_id", None),
         source_report_id=getattr(session, "source_report_id", None),
         source_weakness_key=getattr(session, "source_weakness_key", None),
+        practice_context=load_practice_context(getattr(session, "practice_context_json", None)),
         session_purpose=(getattr(session, "session_purpose", None) or "full_interview"),  # type: ignore[arg-type]
         comparison_group_id=getattr(session, "comparison_group_id", None),
     )
@@ -141,3 +142,14 @@ def parse_interview_plan(plan_json: str | None) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return data if isinstance(data, list) else []
+
+
+def load_practice_context(context_json: str | None) -> dict:
+    """Load the immutable practice source snapshot; invalid legacy content is ignored."""
+    if not context_json:
+        return {}
+    try:
+        data = json.loads(context_json)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}

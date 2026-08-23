@@ -108,6 +108,14 @@ async def test_planner_prompt_contains_type_mode_resume_jd_and_practice_context(
         parent_session_id=3,
         source_report_id=5,
         source_weakness_key="architecture_tradeoff",
+        practice_context={
+            "weakness_title": "方案取舍不清晰",
+            "target_dimension": "系统设计",
+            "source_question": "请说明缓存方案的取舍。",
+            "source_answer": "我会使用 Redis。",
+            "deduction_reasons": ["没有说明一致性边界"],
+            "practice_mode": "similar_question",
+        },
         session_purpose="weakness_practice",
     )
 
@@ -127,6 +135,9 @@ async def test_planner_prompt_contains_type_mode_resume_jd_and_practice_context(
     assert '"source": "resume_snapshot"' in user_prompt and '"projects"' in user_prompt
     assert '"source": "job_description_snapshot"' in user_prompt and "1-2" in user_prompt
     assert '"source": "source_weakness_key"' in user_prompt and "architecture_tradeoff" in user_prompt
+    assert '"source": "practice_source_snapshot"' in user_prompt
+    assert '"weakness_title"' in user_prompt and '"deduction_reasons"' in user_prompt
+    assert "similar_question" in user_prompt
 
 
 @pytest.mark.anyio

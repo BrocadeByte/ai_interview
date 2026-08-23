@@ -33,6 +33,9 @@ class InterviewSession(Base):
     job_description_snapshot_json: Mapped[str | None] = mapped_column(
         LONGTEXT().with_variant(Text, "sqlite"), nullable=True
     )
+    practice_context_json: Mapped[str | None] = mapped_column(
+        LONGTEXT().with_variant(Text, "sqlite"), nullable=True
+    )
     parent_session_id: Mapped[int | None] = mapped_column(
         ForeignKey("interview_sessions.id"), nullable=True, index=True
     )

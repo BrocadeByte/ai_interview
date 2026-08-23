@@ -12,8 +12,10 @@ import { getApiErrorMessage } from '../api/client'
 import {
   createPracticeFromReport,
   fetchPracticeComparison,
+  startPracticeRetest,
   type PracticeComparison
 } from '../api/practice'
+import { rememberInterview } from '../api/interview'
 
 const route = useRoute()
 const router = useRouter()
@@ -21,6 +23,7 @@ const comparison = ref<PracticeComparison | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const continuing = ref(false)
+const startingRetest = ref(false)
 
 const practiceId = computed(() => Number(route.params.id))
 const isPending = computed(() => !comparison.value?.after)
@@ -91,6 +94,20 @@ async function continueNextWeakness() {
     ElMessage.error(getApiErrorMessage(error, '创建下一个短板练习失败'))
   } finally {
     continuing.value = false
+  }
+}
+
+async function beginRetest() {
+  if (!comparison.value || startingRetest.value) return
+  startingRetest.value = true
+  try {
+    const { data } = await startPracticeRetest(practiceId.value)
+    rememberInterview(data)
+    await router.push({ path: `/interviews/${data.id}`, query: { practiceId: String(practiceId.value) } })
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '启动再测失败'))
+  } finally {
+    startingRetest.value = false
   }
 }
 
@@ -170,7 +187,8 @@ onMounted(load)
           class="pending-retest-panel"
         >
           <template #extra>
-            <el-button type="primary" @click="router.push('/reports')">查看训练报告</el-button>
+            <el-button type="primary" :loading="startingRetest" @click="beginRetest">开始再测</el-button>
+            <el-button @click="router.push('/reports')">查看训练报告</el-button>
           </template>
         </el-result>
 

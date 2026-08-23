@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { InterviewSession } from './interview'
+import { normalizeInterviewSession, type InterviewSession } from './interview'
 
 export type QuestionPracticeMode = 'repeat_question' | 'similar_question'
 export type PracticeStatus = 'not_started' | 'practicing' | 'ready_for_retest' | 'completed'
@@ -85,12 +85,14 @@ export function fetchPractices() {
   return apiClient.get<PracticeListItem[]>('/practice')
 }
 
-export function startPractice(id: number) {
-  return apiClient.post<InterviewSession>(`/practice/${id}/start`)
+export async function startPractice(id: number) {
+  const response = await apiClient.post<InterviewSession>(`/practice/${id}/start`)
+  return { ...response, data: normalizeInterviewSession(response.data) }
 }
 
-export function startPracticeRetest(id: number) {
-  return apiClient.post<InterviewSession>(`/practice/${id}/start-retest`)
+export async function startPracticeRetest(id: number) {
+  const response = await apiClient.post<InterviewSession>(`/practice/${id}/start-retest`)
+  return { ...response, data: normalizeInterviewSession(response.data) }
 }
 
 export async function fetchPracticeComparison(id: number) {
