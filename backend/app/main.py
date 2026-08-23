@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 import app.models  # noqa: F401
-from app.api import auth, interviews, knowledge, knowledge_async, profiles, reports, resumes
+from app.api import auth, interviews, job_descriptions, knowledge, knowledge_async, profiles, reports, resumes
 from app.core.config import settings
 from app.core.database import Base, engine
 from app.rag.embeddings import close_embedding_session
@@ -120,12 +120,22 @@ async def ensure_interview_session_columns(conn) -> None:
     existing_columns = {row[0] for row in result.fetchall()}
     migrations = {
         "interview_plan_json": "ALTER TABLE interview_sessions ADD COLUMN interview_plan_json TEXT NULL",
+        "job_description_id": "ALTER TABLE interview_sessions ADD COLUMN job_description_id INT NULL",
+        "job_description_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN job_description_snapshot_json LONGTEXT NULL",
         "processing_request_id": "ALTER TABLE interview_sessions ADD COLUMN processing_request_id VARCHAR(36) NULL",
         "processing_started_at": "ALTER TABLE interview_sessions ADD COLUMN processing_started_at DATETIME NULL",
     }
     for column, statement in migrations.items():
         if column not in existing_columns:
             await conn.execute(text(statement))
+    indexes = (await conn.execute(text("SHOW INDEX FROM interview_sessions"))).fetchall()
+    if not any(str(row[2]) == "ix_interview_sessions_job_description_id" for row in indexes):
+        await conn.execute(
+            text(
+                "ALTER TABLE interview_sessions "
+                "ADD INDEX ix_interview_sessions_job_description_id (job_description_id)"
+            )
+        )
 
 
 async def ensure_interview_report_columns(conn) -> None:
@@ -174,5 +184,6 @@ app.include_router(profiles.router, prefix="/api")
 app.include_router(interviews.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
 app.include_router(resumes.router, prefix="/api")
+app.include_router(job_descriptions.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
 app.include_router(knowledge_async.router, prefix="/api")

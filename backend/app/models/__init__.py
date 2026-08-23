@@ -1,5 +1,6 @@
 from app.models.auth_session import AuthSession
 from app.models.interview import InterviewMemory, InterviewMessage, InterviewSession
+from app.models.job_description import JobDescription
 from app.models.knowledge import KnowledgeDocument, KnowledgeIngestionTask, KnowledgeReindexJob
 from app.models.profile import UserProfile
 from app.models.report import InterviewReport
@@ -14,6 +15,7 @@ __all__ = [
     "InterviewReport",
     "InterviewScore",
     "InterviewSession",
+    "JobDescription",
     "KnowledgeDocument",
     "KnowledgeIngestionTask",
     "KnowledgeReindexJob",

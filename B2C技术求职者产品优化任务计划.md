@@ -2,7 +2,7 @@
 
 创建日期：2026-08-21
 
-最后更新：2026-08-22，完成 FE-B2C-001、FE-B2C-002、FE-B2C-003、FE-B2C-004、FE-B2C-005 前端实现及 BE-B2C-001 简历模型与解析服务；前端移动端适配继承约束继续有效。
+最后更新：2026-08-23，完成 FE-B2C-001、FE-B2C-002、FE-B2C-003、FE-B2C-004、FE-B2C-005 前端实现及 BE-B2C-001 简历模型与解析服务、BE-B2C-002 JD 模型与解析服务；前端移动端适配继承约束继续有效。
 
 ## 1. 文档目标
 
@@ -869,6 +869,8 @@
 
 优先级：P0
 
+状态：已完成（2026-08-23）
+
 任务：
 
 - 新增 `JobDescription` ORM 模型。
@@ -881,6 +883,15 @@
 - JD 修改后不影响历史面试报告。
 - 面试规划 Prompt 可以读取本场绑定的 JD 快照。
 - 测试覆盖无 JD、普通 JD、超长 JD 和 prompt injection 文本。
+
+完成记录：
+
+- 新增 `JobDescription` ORM 模型和严格 Pydantic Schema，保存所属用户、标题、公司、JD 原文、结构化解析结果、归一化目标岗位、解析状态、激活状态和版本时间；JD 原文限制 20,000 字符。
+- 新增 `/api/job-descriptions/parse`、列表、详情和激活接口；结构化结果覆盖岗位、职级/年限、硬性技能、加分技能、职责、硬性要求、面试重点和风险点，跨用户读取、激活或绑定统一返回 404。
+- JD 通过 `format_untrusted_data` 和安全系统提示进入 LLM，严格校验 JSON Schema 并允许一次 JSON 修复；prompt injection 内容始终位于 `UNTRUSTED` 数据边界，不能改变系统角色和输出结构。
+- 面试创建接口新增可选 `job_description_id`，只允许绑定当前用户已解析的 JD；创建时把 JD 原文和解析结果序列化到 `interview_sessions.job_description_snapshot_json`，后续 JD 变化不会改变历史会话使用的快照。
+- `build_state_from_session` 将冻结快照注入 `target_job`，`interview_planner` 的系统提示和用户提示会读取本场 JD 的硬性技能、职责和面试重点；未传 JD 时保持原有通用岗位状态和旧请求兼容。
+- 测试覆盖普通 JD、空文本、超长文本、无 JD 创建、权限隔离、快照不可变和 prompt injection/规划 Prompt 安全边界；`python -m compileall -q app test` 通过，`python -m pytest test -q` 全量 135 项通过。
 
 ### BE-B2C-003 自动画像生成
 

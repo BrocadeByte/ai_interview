@@ -7,6 +7,7 @@ from app.agents.nodes.interview_planner import get_plan_item_for_question
 from app.agents.state import InterviewState, create_initial_state
 from app.models.interview import InterviewMemory, InterviewMessage, InterviewSession
 from app.models.profile import UserProfile
+from app.services.job_description_service import load_job_description_snapshot
 
 
 def profile_to_dict(profile: UserProfile | None) -> dict:
@@ -75,6 +76,10 @@ def build_state_from_session(
     )
     state["status"] = session.status  # type: ignore[assignment]
     state["interview_plan"] = parse_interview_plan(session.interview_plan_json)
+    state["target_job"] = load_job_description_snapshot(
+        session.job_description_snapshot_json,
+        session.target_position,
+    )
     state["current_question_index"] = session.current_question_index
     state["follow_up_count"] = count_current_followups(messages, session.current_question_index)
     state["messages"] = messages_to_langchain(messages)
