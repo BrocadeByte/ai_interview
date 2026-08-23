@@ -8,6 +8,7 @@ import 'element-plus/theme-chalk/el-tag.css'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { trackAnalyticsEvent } from '../api/analytics'
 import { getApiErrorMessage } from '../api/client'
 import { fetchInterviewScores, type InterviewScore } from '../api/interview'
 import {
@@ -95,6 +96,17 @@ function reportWeaknessKey(index: number) {
 
 function practiceKey(scope: string, index: number) {
   return `${scope}:${index}`
+}
+
+function trackReviewExpanded(event: Event, review: QuestionReview) {
+  const currentReport = report.value
+  if (!(event.currentTarget instanceof HTMLDetailsElement) || !event.currentTarget.open) return
+  if (!currentReport?.is_final || currentReport.id == null) return
+  void trackAnalyticsEvent({
+    event_name: 'question_review_expanded',
+    report_id: currentReport.id,
+    question_review_id: review.id
+  }).catch(() => undefined)
 }
 
 async function startQuestionPractice(review: QuestionReview, mode: QuestionPracticeMode) {
@@ -238,6 +250,7 @@ onMounted(load)
               v-for="review in questionReviews"
               :key="`${review.question_index}-${review.id}`"
               class="question-review-card"
+              @toggle="trackReviewExpanded($event, review)"
             >
               <summary>
                 <span class="question-review-index">第 {{ review.question_index }} 题</span>

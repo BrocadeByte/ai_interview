@@ -12,6 +12,7 @@ from app.schemas.practice import (
     PracticeFromReportCreate,
     PracticeListItem,
 )
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.practice_service import (
     create_practice_from_question_review,
     create_practice_from_report,
@@ -36,6 +37,17 @@ async def create_from_report(
     db: AsyncSession = Depends(get_db),
 ):
     practice = await create_practice_from_report(db, current_user.id, payload)
+    await record_analytics_event_safely(
+        db,
+        event_name="practice_created",
+        user_id=current_user.id,
+        session_id=practice.practice_session_id,
+        report_id=practice.source_report_id,
+        practice_id=practice.id,
+        question_review_id=practice.source_question_review_id,
+        deduplication_key=f"practice_created:{practice.id}",
+        properties={"practice_mode": practice.practice_mode},
+    )
     await db.commit()
     return practice
 
@@ -51,6 +63,17 @@ async def create_from_question_review(
     db: AsyncSession = Depends(get_db),
 ):
     practice = await create_practice_from_question_review(db, current_user.id, payload)
+    await record_analytics_event_safely(
+        db,
+        event_name="practice_created",
+        user_id=current_user.id,
+        session_id=practice.practice_session_id,
+        report_id=practice.source_report_id,
+        practice_id=practice.id,
+        question_review_id=practice.source_question_review_id,
+        deduplication_key=f"practice_created:{practice.id}",
+        properties={"practice_mode": practice.practice_mode},
+    )
     await db.commit()
     return practice
 
@@ -94,5 +117,14 @@ async def get_comparison(
     db: AsyncSession = Depends(get_db),
 ):
     comparison = await get_practice_comparison(db, current_user.id, practice_id)
+    await record_analytics_event_safely(
+        db,
+        event_name="comparison_viewed",
+        user_id=current_user.id,
+        report_id=comparison.source_report_id,
+        practice_id=practice_id,
+        deduplication_key=f"comparison_viewed:{current_user.id}:{practice_id}",
+        properties={"comparison_ready": comparison.after is not None},
+    )
     await db.commit()
     return comparison

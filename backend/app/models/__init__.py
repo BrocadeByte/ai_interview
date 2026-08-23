@@ -1,3 +1,4 @@
+from app.models.analytics import AnalyticsEvent
 from app.models.auth_session import AuthSession
 from app.models.interview import InterviewMemory, InterviewMessage, InterviewSession
 from app.models.job_description import JobDescription
@@ -11,6 +12,7 @@ from app.models.score import InterviewScore
 from app.models.user import User
 
 __all__ = [
+    "AnalyticsEvent",
     "AuthSession",
     "InterviewMessage",
     "InterviewMemory",

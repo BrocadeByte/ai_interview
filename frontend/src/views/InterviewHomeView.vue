@@ -14,6 +14,7 @@ import '../styles/pages/interview-home.css'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { trackAnalyticsEvent } from '../api/analytics'
 import { getApiErrorMessage } from '../api/client'
 import { createInterview, fetchInterviews, rememberInterview, type InterviewCreateInput, type InterviewSession, type InterviewType, warmupInterview } from '../api/interview'
 import { parseJobDescription } from '../api/jobDescription'
@@ -214,6 +215,11 @@ async function confirmGeneratedProfile() {
     const { id: _id, user_id: _userId, ...profileFields } = currentProfile.value
     const payload: Profile = { ...profileFields, ...profileDraft.value.profile_patch }
     const { data } = await updateProfile(payload)
+    void trackAnalyticsEvent({
+      event_name: 'profile_applied',
+      ...(resumeId.value ? { resume_id: resumeId.value } : {}),
+      ...(jobDescriptionId.value ? { job_description_id: jobDescriptionId.value } : {})
+    }).catch(() => undefined)
     currentProfile.value = data
     profileConfirmed.value = true
     if (data.target_position) form.target_position = data.target_position

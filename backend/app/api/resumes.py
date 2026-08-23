@@ -9,6 +9,7 @@ from app.models.resume import Resume
 from app.models.user import User
 from app.schemas.profile import ProfileRead
 from app.schemas.resume import ParsedResume, ResumePaste, ResumeProfilePatch, ResumeRead
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.resume_service import (
     load_json_object,
     parse_resume_text,
@@ -131,6 +132,14 @@ async def apply_resume_to_profile(
     for field, value in patch.model_dump(exclude_none=True).items():
         setattr(profile, field, value)
     db.add(profile)
+    await record_analytics_event_safely(
+        db,
+        event_name="profile_applied",
+        user_id=current_user.id,
+        resume_id=resume.id,
+        deduplication_key=f"profile_applied:resume:{current_user.id}:{resume.id}",
+        properties={"source": "resume_profile_patch"},
+    )
     await db.commit()
     await db.refresh(profile)
     return profile
@@ -146,6 +155,14 @@ async def _persist_and_parse_resume(db: AsyncSession, resume: Resume) -> ResumeR
         resume.parsed_json, resume.profile_patch_json = serialize_resume_parse_output(output)
         resume.status = "parsed"
         resume.error_message = None
+        await record_analytics_event_safely(
+            db,
+            event_name="resume_uploaded" if resume.source_type == "upload" else "resume_pasted",
+            user_id=resume.user_id,
+            resume_id=resume.id,
+            deduplication_key=f"resume_{resume.source_type}:{resume.id}",
+            properties={"file_type": resume.file_type} if resume.file_type else None,
+        )
         await db.commit()
         await db.refresh(resume)
     except Exception as exc:

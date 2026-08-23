@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.job_description import ParsedJobDescription
 from app.schemas.profile import AutoProfileDraft, AutoProfileGenerate, ProfileRead, ProfileUpdate
 from app.schemas.resume import ParsedResume, ResumeProfilePatch
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.job_description_service import load_parsed_job_description
 from app.services.profile_service import build_auto_profile_draft
 from app.services.resume_service import load_json_object
@@ -25,7 +26,7 @@ async def auto_generate_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AutoProfileDraft:
-    """Generate a reviewable draft; this endpoint deliberately performs no writes."""
+    """Generate a reviewable draft without writing any profile fields."""
     profile = await _get_user_profile(db, current_user.id)
     existing_profile = ProfileRead.model_validate(profile).model_dump(exclude={"id", "user_id"}) if profile else None
 
@@ -66,13 +67,23 @@ async def auto_generate_profile(
                 detail="Stored job description parsing result is invalid",
             ) from exc
 
-    return build_auto_profile_draft(
+    draft = build_auto_profile_draft(
         existing_profile=existing_profile,
         resume_patch=resume_patch,
         parsed_resume=parsed_resume,
         parsed_job_description=parsed_job_description,
         requested_target_position=payload.target_position,
     )
+    await record_analytics_event_safely(
+        db,
+        event_name="profile_auto_generated",
+        user_id=current_user.id,
+        resume_id=payload.resume_id,
+        job_description_id=payload.job_description_id,
+        properties={"completeness": draft.completeness},
+    )
+    await db.commit()
+    return draft
 
 
 # 获取当前登录用户的求职画像；如果不存在则自动创建空画像。

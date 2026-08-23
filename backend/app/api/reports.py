@@ -9,6 +9,7 @@ from app.models.report import InterviewReport
 from app.models.user import User
 from app.schemas.question_review import QuestionReviewRead
 from app.schemas.report import InterviewReportListItem, InterviewReportRead
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.question_review_service import ensure_question_reviews
 from app.services.report_service import repair_report_if_incomplete, report_to_read
 
@@ -102,5 +103,13 @@ async def get_report(
     if await repair_report_if_incomplete(db, report, session):
         await db.flush()
     await ensure_question_reviews(db, report)
+    await record_analytics_event_safely(
+        db,
+        event_name="report_viewed",
+        user_id=current_user.id,
+        session_id=session.id,
+        report_id=report.id,
+        deduplication_key=f"report_viewed:{current_user.id}:{report.id}",
+    )
     await db.commit()
     return report_to_read(report)

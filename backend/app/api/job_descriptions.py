@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models.job_description import JobDescription
 from app.models.user import User
 from app.schemas.job_description import JobDescriptionParse, JobDescriptionRead
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.job_description_service import (
     parse_job_description_text,
     safe_job_description_parse_error,
@@ -44,6 +45,13 @@ async def parse_job_description(
         job_description.target_position = parsed.target_position
         job_description.status = "parsed"
         job_description.error_message = None
+        await record_analytics_event_safely(
+            db,
+            event_name="jd_pasted",
+            user_id=current_user.id,
+            job_description_id=job_description.id,
+            deduplication_key=f"jd_pasted:{job_description.id}",
+        )
         await db.commit()
         await db.refresh(job_description)
     except Exception as exc:

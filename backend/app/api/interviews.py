@@ -27,6 +27,7 @@ from app.schemas.llm_outputs import VisibleQuestionOutput
 from app.schemas.question_review import QuestionReviewRead
 from app.schemas.report import InterviewReportRead
 from app.schemas.score import InterviewScoreRead
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.interview_answer_service import (
     SessionLeaseHeartbeat,
     SessionLeaseLostError,
@@ -163,6 +164,21 @@ async def create_interview(
         comparison_group_id=payload.comparison_group_id,
     )
     db.add(session)
+    await db.flush()
+    await record_analytics_event_safely(
+        db,
+        event_name="interview_created",
+        user_id=current_user.id,
+        session_id=session.id,
+        resume_id=session.resume_id,
+        job_description_id=session.job_description_id,
+        deduplication_key=f"interview_created:{session.id}",
+        properties={
+            "mode": session.mode,
+            "interview_type": session.interview_type,
+            "session_purpose": session.session_purpose,
+        },
+    )
     await db.commit()
     return await _load_session(db, current_user.id, session.id)
 
@@ -180,7 +196,8 @@ async def start_interview(
     if session.messages:
         if session.status == "preparing":
             session.status = "active"
-            await db.commit()
+        await _record_interview_started(db, session)
+        await db.commit()
         return await _load_session(db, current_user.id, session.id)
 
     start_request_id = str(uuid4())
@@ -233,7 +250,8 @@ async def start_interview_stream(
     if session.messages:
         if session.status == "preparing":
             session.status = "active"
-            await db.commit()
+        await _record_interview_started(db, session)
+        await db.commit()
         loaded = await _load_session(db, current_user.id, session.id)
         return _sse_response(_completed_session_stream(loaded))
 
@@ -389,6 +407,15 @@ async def get_interview_report(
 ) -> InterviewReportRead:
     await _load_session(db, current_user.id, session_id)
     report = await get_or_create_report(db, session_id)
+    if report.id is not None and report.is_final:
+        await record_analytics_event_safely(
+            db,
+            event_name="report_viewed",
+            user_id=current_user.id,
+            session_id=session_id,
+            report_id=report.id,
+            deduplication_key=f"report_viewed:{current_user.id}:{report.id}",
+        )
     await db.commit()
     return report
 
@@ -652,6 +679,8 @@ async def _process_answer(
         )
     )
     await sync_practice_for_interview(db, session)
+    if session.status == "finished":
+        await _record_interview_finished(db, session)
     await release_answer_lease(
         db,
         session_id=session.id,
@@ -672,6 +701,8 @@ async def finish_interview(
     """主动结束面试，并复用回答租约与提交回答互斥，避免终止和评分并发写入。"""
     session = await _load_session(db, current_user.id, session_id)
     if session.status == "finished":
+        await _record_interview_finished(db, session)
+        await db.commit()
         return session
 
     finish_request_id = str(uuid4())
@@ -709,6 +740,7 @@ async def finish_interview(
             )
         )
         await sync_practice_for_interview(db, session)
+        await _record_interview_finished(db, session)
         await release_answer_lease(
             db,
             session_id=session.id,
@@ -741,6 +773,7 @@ async def _process_start(
         session.interview_plan_json = json.dumps(result.get("interview_plan") or [], ensure_ascii=False)
         session.status = "active"
         await sync_practice_for_interview(db, session)
+        await _record_interview_started(db, session)
         question = _validated_visible_question(result["current_question"])
         db.add(
             InterviewMessage(
@@ -786,6 +819,59 @@ async def _load_session(db: AsyncSession, user_id: int, session_id: int) -> Inte
     attach_current_plan_fields(session)
     await attach_practice_fields(db, session)
     return session
+
+
+async def _record_interview_started(db: AsyncSession, session: InterviewSession) -> None:
+    await record_analytics_event_safely(
+        db,
+        event_name="interview_started",
+        user_id=session.user_id,
+        session_id=session.id,
+        report_id=session.source_report_id,
+        practice_id=getattr(session, "practice_id", None),
+        deduplication_key=f"interview_started:{session.id}",
+        properties={
+            "mode": session.mode,
+            "interview_type": session.interview_type,
+            "session_purpose": session.session_purpose,
+        },
+    )
+
+
+async def _record_interview_finished(db: AsyncSession, session: InterviewSession) -> None:
+    if session.status != "finished":
+        return
+    practice_id = getattr(session, "practice_id", None)
+    await record_analytics_event_safely(
+        db,
+        event_name="interview_finished",
+        user_id=session.user_id,
+        session_id=session.id,
+        report_id=session.source_report_id,
+        practice_id=practice_id,
+        deduplication_key=f"interview_finished:{session.id}",
+        properties={"session_purpose": session.session_purpose},
+    )
+    if session.session_purpose == "weakness_practice":
+        await record_analytics_event_safely(
+            db,
+            event_name="practice_finished",
+            user_id=session.user_id,
+            session_id=session.id,
+            report_id=session.source_report_id,
+            practice_id=practice_id,
+            deduplication_key=f"practice_finished:{session.id}",
+        )
+    elif session.session_purpose == "retest":
+        await record_analytics_event_safely(
+            db,
+            event_name="retest_finished",
+            user_id=session.user_id,
+            session_id=session.id,
+            report_id=session.source_report_id,
+            practice_id=practice_id,
+            deduplication_key=f"retest_finished:{session.id}",
+        )
 
 
 # 查询用户的求职画像。
