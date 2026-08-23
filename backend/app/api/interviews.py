@@ -38,7 +38,7 @@ from app.services.interview_state_service import build_state_from_session
 from app.services.job_description_service import build_job_description_snapshot
 from app.services.resume_service import build_resume_snapshot
 from app.services.interview_memory_service import maybe_compact_medium_term_memory
-from app.services.report_service import get_or_create_report
+from app.services.report_service import get_or_create_report, is_final_report_session
 from app.services.llm_stream import (
     reset_stream_delta_callback,
     reset_stream_text_done_callback,
@@ -134,7 +134,10 @@ async def create_interview(
             .join(InterviewSession, InterviewSession.id == InterviewReport.session_id)
             .where(
                 InterviewReport.id == payload.source_report_id,
+                InterviewReport.is_final.is_(True),
                 InterviewSession.user_id == current_user.id,
+                InterviewSession.status == "finished",
+                InterviewSession.session_purpose == "full_interview",
             )
         )
         if source_report_exists is None:
@@ -360,8 +363,15 @@ async def get_interview_question_reviews(
     db: AsyncSession = Depends(get_db),
 ) -> list[QuestionReviewRead]:
     """Generate the report if needed, then return its stable per-score reviews."""
-    await _load_session(db, current_user.id, session_id)
+    session = await _load_session(db, current_user.id, session_id)
+    if not is_final_report_session(session):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Question reviews are available after the full interview is finished",
+        )
     report_read = await get_or_create_report(db, session_id)
+    if report_read.id is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Final report is not available")
     report = await db.get(InterviewReport, report_read.id)
     if report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")

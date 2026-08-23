@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -15,38 +16,70 @@ from app.services.score_service import list_scores
 
 
 async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewReportRead:
-    """返回已有面试报告；不存在时汇总消息和评分、调用模型生成并保存报告。"""
+    """进行中会话每次按当前评分生成非持久化预览；完整面试结束后才保存最终快照。"""
+    session = await db.get(InterviewSession, session_id)
+    if session is None:
+        raise ValueError(f"Interview session {session_id} does not exist")
+
     existing = await db.scalar(select(InterviewReport).where(InterviewReport.session_id == session_id))
-    if existing:
-        session = await db.get(InterviewSession, session_id)
+    if existing and bool(existing.is_final) and is_final_report_session(session):
         await repair_report_if_incomplete(db, existing, session)
         await ensure_question_reviews(db, existing)
         return _report_to_read(existing)
 
     messages = await _list_messages(db, session_id)
-    session = await db.get(InterviewSession, session_id)
     scores = [score.model_dump() for score in await list_scores(db, session_id)]
     report_stats = build_report_stats(session, scores)
     report_data = await generate_report(messages, scores, report_stats, session.target_position)
     score_citations = [citation for score in scores for citation in score.get("citations") or []]
     citations = merge_citations(score_citations, report_data.get("citations"))
 
-    report = InterviewReport(
-        session_id=session_id,
-        total_score=int(report_stats.get("total_score") or 0),
-        summary=str(report_data.get("summary") or ""),
-        strengths=json.dumps(report_data.get("strengths") or [], ensure_ascii=False),
-        weaknesses=json.dumps(report_data.get("weaknesses") or [], ensure_ascii=False),
-        suggestions=json.dumps(report_data.get("suggestions") or [], ensure_ascii=False),
-        dimension_scores_json=json.dumps(report_stats.get("dimension_scores") or [], ensure_ascii=False),
-        citations_json=citations_to_json(citations),
-        learning_path=json.dumps(report_data.get("learning_path") or [], ensure_ascii=False),
-        sample_answer=str(report_data.get("sample_answer") or ""),
+    if not is_final_report_session(session):
+        now = datetime.utcnow()
+        return InterviewReportRead(
+            id=None,
+            session_id=session_id,
+            total_score=int(report_stats.get("total_score") or 0),
+            summary=str(report_data.get("summary") or ""),
+            strengths=report_data.get("strengths") or [],
+            weaknesses=report_data.get("weaknesses") or [],
+            suggestions=report_data.get("suggestions") or [],
+            dimension_scores=report_stats.get("dimension_scores") or [],
+            learning_path=report_data.get("learning_path") or [],
+            sample_answer=str(report_data.get("sample_answer") or ""),
+            citations=citations,
+            is_final=False,
+            generated_from_score_count=len(scores),
+            created_at=now,
+            updated_at=now,
+        )
+
+    report = existing or InterviewReport(session_id=session_id)
+    if existing is not None and not bool(existing.is_final):
+        report.created_at = datetime.utcnow()
+    report.total_score = int(report_stats.get("total_score") or 0)
+    report.summary = str(report_data.get("summary") or "")
+    report.strengths = json.dumps(report_data.get("strengths") or [], ensure_ascii=False)
+    report.weaknesses = json.dumps(report_data.get("weaknesses") or [], ensure_ascii=False)
+    report.suggestions = json.dumps(report_data.get("suggestions") or [], ensure_ascii=False)
+    report.dimension_scores_json = json.dumps(
+        report_stats.get("dimension_scores") or [], ensure_ascii=False
     )
-    db.add(report)
+    report.citations_json = citations_to_json(citations)
+    report.learning_path = json.dumps(report_data.get("learning_path") or [], ensure_ascii=False)
+    report.sample_answer = str(report_data.get("sample_answer") or "")
+    report.is_final = True
+    report.generated_from_score_count = len(scores)
+    if existing is None:
+        db.add(report)
     await db.flush()
     await ensure_question_reviews(db, report)
     return _report_to_read(report)
+
+
+def is_final_report_session(session: InterviewSession) -> bool:
+    """仅自然结束或主动结束的完整面试可以产生最终报告。"""
+    return session.status == "finished" and session.session_purpose == "full_interview"
 
 
 async def repair_report_if_incomplete(
@@ -225,6 +258,8 @@ def report_to_read(report: InterviewReport) -> InterviewReportRead:
         learning_path=json.loads(report.learning_path or "[]"),
         sample_answer=report.sample_answer,
         citations=citations_from_json(report.citations_json),
+        is_final=bool(report.is_final),
+        generated_from_score_count=int(report.generated_from_score_count or 0),
         created_at=report.created_at,
         updated_at=report.updated_at,
     )

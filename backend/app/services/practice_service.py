@@ -284,7 +284,13 @@ async def _get_owned_report(
         await db.execute(
             select(InterviewReport, InterviewSession)
             .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-            .where(InterviewReport.id == report_id, InterviewSession.user_id == user_id)
+            .where(
+                InterviewReport.id == report_id,
+                InterviewReport.is_final.is_(True),
+                InterviewSession.user_id == user_id,
+                InterviewSession.status == "finished",
+                InterviewSession.session_purpose == "full_interview",
+            )
         )
     ).first()
     if result is None:

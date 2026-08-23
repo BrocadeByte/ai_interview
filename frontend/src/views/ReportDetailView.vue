@@ -98,12 +98,13 @@ function practiceKey(scope: string, index: number) {
 }
 
 async function startQuestionPractice(review: QuestionReview, mode: QuestionPracticeMode) {
-  if (!report.value) return
+  const currentReport = report.value
+  if (!currentReport?.is_final || currentReport.id == null) return
   const loadingKey = practiceKey(mode, review.question_index)
   practiceLoadingKey.value = loadingKey
   try {
     const { data } = await createPracticeFromQuestionReview({
-      report_id: report.value.id,
+      report_id: currentReport.id,
       question_review_id: review.id,
       score_id: review.score_id,
       question_index: review.question_index,
@@ -121,12 +122,13 @@ async function startQuestionPractice(review: QuestionReview, mode: QuestionPract
 }
 
 async function startWeaknessPractice(weakness: string, index: number) {
-  if (!report.value) return
+  const currentReport = report.value
+  if (!currentReport?.is_final || currentReport.id == null) return
   const loadingKey = practiceKey('weakness', index)
   practiceLoadingKey.value = loadingKey
   try {
     const { data } = await createPracticeFromReport({
-      report_id: report.value.id,
+      report_id: currentReport.id,
       weakness_key: reportWeaknessKey(index),
       weakness_title: weakness
     })
@@ -143,9 +145,13 @@ async function loadQuestionReviews(currentReport: InterviewReport) {
   reviewFallback.value = false
   reviewUnavailable.value = false
   try {
-    const { data } = isSessionReport.value
+    const response = isSessionReport.value
       ? await fetchInterviewQuestionReviews(currentReport.session_id)
-      : await fetchReportQuestionReviews(currentReport.id)
+      : currentReport.id != null
+        ? await fetchReportQuestionReviews(currentReport.id)
+        : null
+    if (response == null) throw new Error('Preview has no persisted question reviews')
+    const { data } = response
     questionReviews.value = data
   } catch {
     try {
@@ -187,8 +193,9 @@ onMounted(load)
         <header class="report-hero">
           <div>
             <span class="eyebrow">TECH INTERVIEW REVIEW</span>
-            <h1>面试复盘报告</h1>
-            <p>训练编号 #{{ report.session_id }} · 基于完整问答记录生成</p>
+            <h1>{{ report.is_final ? '面试复盘报告' : '面试报告预览' }}</h1>
+            <p v-if="report.is_final">训练编号 #{{ report.session_id }} · 基于全部 {{ report.generated_from_score_count }} 条评分生成</p>
+            <p v-else>训练编号 #{{ report.session_id }} · 基于当前 {{ report.generated_from_score_count }} 条评分的临时预览，结束面试后才会保存最终报告</p>
           </div>
           <div class="total-score">
             <span>{{ report.total_score }}</span>
@@ -271,7 +278,7 @@ onMounted(load)
                   <p v-else class="review-placeholder">逐题示范回答待复盘服务生成；请不要直接套用报告级示例，以免引入未经你确认的经历或数据。</p>
                 </div>
 
-                <div class="question-practice-actions">
+                <div v-if="report.is_final" class="question-practice-actions">
                   <el-button
                     :loading="practiceLoadingKey === practiceKey('repeat_question', review.question_index)"
                     :disabled="Boolean(practiceLoadingKey)"
@@ -302,6 +309,7 @@ onMounted(load)
               <li v-for="(item, index) in report.weaknesses" :key="item">
                 <span>{{ item }}</span>
                 <el-button
+                  v-if="report.is_final"
                   size="small"
                   type="primary"
                   plain

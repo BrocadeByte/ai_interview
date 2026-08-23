@@ -26,7 +26,13 @@ async def get_report_question_reviews(
     row = await db.execute(
         select(InterviewReport, InterviewSession)
         .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(InterviewReport.id == report_id, InterviewSession.user_id == current_user.id)
+        .where(
+            InterviewReport.id == report_id,
+            InterviewReport.is_final.is_(True),
+            InterviewSession.user_id == current_user.id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+        )
     )
     result = row.first()
     if not result:
@@ -47,7 +53,12 @@ async def list_reports(
     rows = await db.execute(
         select(InterviewReport, InterviewSession)
         .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(InterviewSession.user_id == current_user.id)
+        .where(
+            InterviewSession.user_id == current_user.id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+            InterviewReport.is_final.is_(True),
+        )
         .order_by(InterviewReport.created_at.desc())
     )
 
@@ -75,7 +86,13 @@ async def get_report(
     row = await db.execute(
         select(InterviewReport, InterviewSession)
         .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(InterviewReport.id == report_id, InterviewSession.user_id == current_user.id)
+        .where(
+            InterviewReport.id == report_id,
+            InterviewReport.is_final.is_(True),
+            InterviewSession.user_id == current_user.id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+        )
     )
     result = row.first()
     if not result:

@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -24,8 +25,11 @@ import app.api.interviews as interviews_api
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.main import app
-from app.models.interview import InterviewMemory
+from app.main import app, ensure_interview_report_columns
+from app.models.interview import InterviewMemory, InterviewSession
+from app.models.report import InterviewReport
+from app.models.score import InterviewScore
+from app.models.user import User
 from app.services import interview_memory_service
 
 
@@ -171,6 +175,24 @@ async def test_register_profile_interview_answer_report_flow(client: AsyncClient
     assert scores[0]["score"] == 82
     assert scores[0]["dimension"] == "项目经验"
 
+    first_preview_response = await client.get(
+        f"/api/interviews/{interview['id']}/report", headers=headers
+    )
+    assert first_preview_response.status_code == 200
+    first_preview = first_preview_response.json()
+    assert first_preview["id"] is None
+    assert first_preview["is_final"] is False
+    assert first_preview["generated_from_score_count"] == 1
+    assert (
+        await client.get(f"/api/interviews/{interview['id']}/question-reviews", headers=headers)
+    ).status_code == 409
+    assert (await client.get("/api/reports", headers=headers)).json() == []
+    async with test_session_factory() as db:
+        assert await db.scalar(
+            text("SELECT COUNT(*) FROM interview_reports WHERE session_id = :session_id"),
+            {"session_id": interview["id"]},
+        ) == 0
+
     second_answer_response = await client.post(
         f"/api/interviews/{interview['id']}/answer",
         headers=headers,
@@ -180,15 +202,38 @@ async def test_register_profile_interview_answer_report_flow(client: AsyncClient
     scores = (await client.get(f"/api/interviews/{interview['id']}/scores", headers=headers)).json()
     assert len(scores) == 2
 
+    second_preview_response = await client.get(
+        f"/api/interviews/{interview['id']}/report", headers=headers
+    )
+    assert second_preview_response.status_code == 200
+    second_preview = second_preview_response.json()
+    assert second_preview["id"] is None
+    assert second_preview["is_final"] is False
+    assert second_preview["generated_from_score_count"] == 2
+    async with test_session_factory() as db:
+        assert await db.scalar(
+            text("SELECT COUNT(*) FROM interview_reports WHERE session_id = :session_id"),
+            {"session_id": interview["id"]},
+        ) == 0
+
+    finish_response = await client.post(f"/api/interviews/{interview['id']}/finish", headers=headers)
+    assert finish_response.status_code == 200
+    assert finish_response.json()["status"] == "finished"
+
     report_response = await client.get(f"/api/interviews/{interview['id']}/report", headers=headers)
     assert report_response.status_code == 200
     report = report_response.json()
+    assert report["id"] is not None
+    assert report["is_final"] is True
+    assert report["generated_from_score_count"] == 2
     assert report["total_score"] == 82
     assert report["summary"] == "整体表现良好。"
     assert report["dimension_scores"]
     assert report["dimension_scores"][0]["dimension"] == "项目经验"
     assert report["dimension_scores"][0]["score"] == 82
     assert report["dimension_scores"][0]["question_indexes"] == [1, 2]
+    listed_reports = (await client.get("/api/reports", headers=headers)).json()
+    assert [item["id"] for item in listed_reports] == [report["id"]]
 
     report_reviews_response = await client.get(
         f"/api/reports/{report['id']}/question-reviews",
@@ -243,6 +288,9 @@ async def test_register_profile_interview_answer_report_flow(client: AsyncClient
     assert stable_reviews[0]["answer"] == first_snapshot["answer"]
     assert stable_reviews[0]["deduction_reasons"] == first_snapshot["deduction_reasons"]
     assert stable_reviews[0]["sample_answer"] == first_snapshot["sample_answer"]
+    stable_report = (await client.get(f"/api/reports/{report['id']}", headers=headers)).json()
+    assert stable_report["summary"] == report["summary"]
+    assert stable_report["generated_from_score_count"] == 2
 
     async with test_session_factory() as db:
         await db.execute(
@@ -560,6 +608,108 @@ async def test_finish_interview_marks_session_finished(client: AsyncClient) -> N
     assert data["status"] == "finished"
     assert data["messages"][-1]["role"] == "assistant"
     assert "已完成" in data["messages"][-1]["content"]
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_migration_distinguishes_final_reports_from_old_previews(
+    test_session_factory,
+) -> None:
+    base_time = datetime(2026, 8, 23, 10, 0, 0)
+    async with test_session_factory() as db:
+        user = User(email="report-migration@example.com", username="report-migration", password_hash="x")
+        db.add(user)
+        await db.flush()
+        sessions = [
+            InterviewSession(
+                user_id=user.id,
+                target_position="stale preview",
+                difficulty="medium",
+                status="finished",
+                session_purpose="full_interview",
+            ),
+            InterviewSession(
+                user_id=user.id,
+                target_position="historical final",
+                difficulty="medium",
+                status="finished",
+                session_purpose="full_interview",
+            ),
+            InterviewSession(
+                user_id=user.id,
+                target_position="active preview",
+                difficulty="medium",
+                status="active",
+                session_purpose="full_interview",
+            ),
+        ]
+        db.add_all(sessions)
+        await db.flush()
+
+        def score(session_id: int, index: int, created_at: datetime) -> InterviewScore:
+            return InterviewScore(
+                session_id=session_id,
+                question_index=index,
+                question=f"question {index}",
+                answer=f"answer {index}",
+                dimension="general",
+                score=80,
+                sub_scores="{}",
+                reason="reason",
+                weaknesses="[]",
+                suggestions="[]",
+                created_at=created_at,
+            )
+
+        db.add_all([
+            score(sessions[0].id, 1, base_time),
+            score(sessions[0].id, 2, base_time + timedelta(minutes=2)),
+            score(sessions[1].id, 1, base_time),
+            score(sessions[2].id, 1, base_time),
+        ])
+
+        def report(session_id: int, updated_at: datetime) -> InterviewReport:
+            return InterviewReport(
+                session_id=session_id,
+                total_score=80,
+                summary="snapshot",
+                strengths="[]",
+                weaknesses="[]",
+                suggestions="[]",
+                learning_path="[]",
+                sample_answer="sample",
+                created_at=updated_at,
+                updated_at=updated_at,
+            )
+
+        reports = [
+            report(sessions[0].id, base_time + timedelta(minutes=1)),
+            report(sessions[1].id, base_time + timedelta(minutes=1)),
+            report(sessions[2].id, base_time + timedelta(minutes=1)),
+        ]
+        db.add_all(reports)
+        await db.commit()
+        report_ids = [item.id for item in reports]
+
+    test_engine = test_session_factory.kw["bind"]
+    async with test_engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE interview_reports DROP COLUMN is_final"))
+        await conn.execute(
+            text("ALTER TABLE interview_reports DROP COLUMN generated_from_score_count")
+        )
+        await ensure_interview_report_columns(conn)
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, is_final, generated_from_score_count FROM interview_reports "
+                    "ORDER BY id"
+                )
+            )
+        ).fetchall()
+
+    migrated = {row[0]: (bool(row[1]), row[2]) for row in rows}
+    assert migrated[report_ids[0]] == (False, 2)
+    assert migrated[report_ids[1]] == (True, 1)
+    assert migrated[report_ids[2]] == (False, 1)
 
 
 @pytest.mark.anyio

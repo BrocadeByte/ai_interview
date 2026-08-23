@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -20,5 +20,11 @@ class InterviewReport(Base):
     citations_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     learning_path: Mapped[str] = mapped_column(Text)
     sample_answer: Mapped[str] = mapped_column(Text)
+    is_final: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("TRUE"), nullable=False
+    )
+    generated_from_score_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -233,6 +233,8 @@ class _FakeReportDb:
         self.session = SimpleNamespace(
             target_position="Python Backend Engineer",
             interview_plan_json=None,
+            status="finished",
+            session_purpose="full_interview",
         )
 
     async def scalar(self, statement):
@@ -294,6 +296,8 @@ async def test_report_keeps_saved_snapshot_when_knowledge_source_changes(monkeyp
     second = await report_service.get_or_create_report(db, 9)
 
     assert generation_calls == 1
+    assert first.is_final is True
+    assert first.generated_from_score_count == 1
     assert [citation.purpose for citation in first.citations] == ["answer", "report"]
     assert second.citations[1].title == "Report rubric v3"
     assert second.citations[1].index_version == 3

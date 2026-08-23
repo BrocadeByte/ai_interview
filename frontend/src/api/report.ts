@@ -24,7 +24,7 @@ export interface QuestionReview {
 }
 
 export interface InterviewReport {
-  id: number
+  id: number | null
   session_id: number
   total_score: number
   summary: string
@@ -35,6 +35,8 @@ export interface InterviewReport {
   learning_path: string[]
   sample_answer: string
   citations: KnowledgeCitation[]
+  is_final: boolean
+  generated_from_score_count: number
   created_at: string
   updated_at: string
 }
