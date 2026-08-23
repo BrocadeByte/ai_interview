@@ -20,6 +20,8 @@ from app.core.database import get_db
 from app.models.interview import InterviewMessage, InterviewSession
 from app.models.job_description import JobDescription
 from app.models.profile import UserProfile
+from app.models.report import InterviewReport
+from app.models.resume import Resume
 from app.models.user import User
 from app.schemas.interview import InterviewAnswer, InterviewCreate, InterviewListItem, InterviewSessionRead, InterviewWarmup
 from app.schemas.llm_outputs import VisibleQuestionOutput
@@ -34,6 +36,7 @@ from app.services.interview_answer_service import (
 )
 from app.services.interview_state_service import build_state_from_session
 from app.services.job_description_service import build_job_description_snapshot
+from app.services.resume_service import build_resume_snapshot
 from app.services.interview_memory_service import maybe_compact_medium_term_memory
 from app.services.report_service import get_or_create_report
 from app.services.llm_stream import (
@@ -83,7 +86,20 @@ async def create_interview(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewSession:
-    """创建待启动会话，并冻结用户选中的 JD 快照。"""
+    """创建待启动会话，并冻结用户选中的简历与 JD 快照。"""
+    resume = None
+    if payload.resume_id is not None:
+        resume = await db.scalar(
+            select(Resume).where(Resume.id == payload.resume_id, Resume.user_id == current_user.id)
+        )
+        if resume is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
+        if resume.status != "parsed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only a parsed resume can be used for an interview",
+            )
+
     job_description = None
     if payload.job_description_id is not None:
         job_description = await db.scalar(
@@ -99,15 +115,47 @@ async def create_interview(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Only a parsed job description can be used for an interview",
             )
+
+    if payload.parent_session_id is not None:
+        parent_exists = await db.scalar(
+            select(InterviewSession.id).where(
+                InterviewSession.id == payload.parent_session_id,
+                InterviewSession.user_id == current_user.id,
+            )
+        )
+        if parent_exists is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent interview not found")
+
+    if payload.source_report_id is not None:
+        source_report_exists = await db.scalar(
+            select(InterviewReport.id)
+            .join(InterviewSession, InterviewSession.id == InterviewReport.session_id)
+            .where(
+                InterviewReport.id == payload.source_report_id,
+                InterviewSession.user_id == current_user.id,
+            )
+        )
+        if source_report_exists is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source report not found")
+
     session = InterviewSession(
         user_id=current_user.id,
         target_position=payload.target_position,
         difficulty=payload.difficulty,
+        mode=payload.mode,
+        interview_type=payload.interview_type,
         status="preparing",
+        resume_id=resume.id if resume else None,
+        resume_snapshot_json=build_resume_snapshot(resume) if resume else None,
         job_description_id=job_description.id if job_description else None,
         job_description_snapshot_json=(
             build_job_description_snapshot(job_description) if job_description else None
         ),
+        parent_session_id=payload.parent_session_id,
+        source_report_id=payload.source_report_id,
+        source_weakness_key=payload.source_weakness_key,
+        session_purpose=payload.session_purpose,
+        comparison_group_id=payload.comparison_group_id,
     )
     db.add(session)
     await db.commit()

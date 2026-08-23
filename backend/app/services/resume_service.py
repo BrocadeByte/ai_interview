@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import HTTPException, UploadFile, status
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.schemas.resume import MAX_RESUME_TEXT_CHARS, ResumeParseOutput
+from app.schemas.resume import MAX_RESUME_TEXT_CHARS, ParsedResume, ResumeParseOutput, ResumeProfilePatch
 from app.services.knowledge_file_service import (
     MAX_KNOWLEDGE_FILE_BYTES,
     get_document_parser,
@@ -146,3 +146,36 @@ def load_json_object(value: str | None) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         raise ValueError("Stored resume JSON must be an object")
     return parsed
+
+
+def build_resume_snapshot(resume: Any) -> str:
+    """Freeze the selected parsed resume so later source changes cannot alter this interview."""
+    parsed = load_json_object(resume.parsed_json)
+    profile_patch = load_json_object(resume.profile_patch_json)
+    snapshot = {
+        "source_id": resume.id,
+        "title": resume.title,
+        "source_type": resume.source_type,
+        "file_name": resume.file_name,
+        "file_type": resume.file_type,
+        "raw_text": resume.raw_text,
+        "parsed": ParsedResume.model_validate(parsed).model_dump(mode="json") if parsed else None,
+        "profile_patch": (
+            ResumeProfilePatch.model_validate(profile_patch).model_dump(mode="json")
+            if profile_patch
+            else None
+        ),
+        "captured_at": resume.updated_at.isoformat() if resume.updated_at else None,
+    }
+    return json.dumps(snapshot, ensure_ascii=False)
+
+
+def load_resume_snapshot(value: str | None) -> dict[str, Any] | None:
+    """Load a frozen resume defensively; malformed legacy values degrade to no resume."""
+    if not value:
+        return None
+    try:
+        data = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None

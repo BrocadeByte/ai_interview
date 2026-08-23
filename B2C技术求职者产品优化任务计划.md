@@ -2,7 +2,7 @@
 
 创建日期：2026-08-21
 
-最后更新：2026-08-23，完成 FE-B2C-001、FE-B2C-002、FE-B2C-003、FE-B2C-004、FE-B2C-005 前端实现及 BE-B2C-001 简历模型与解析服务、BE-B2C-002 JD 模型与解析服务、BE-B2C-003 自动画像生成；前端移动端适配继承约束继续有效。
+最后更新：2026-08-23，完成 FE-B2C-001、FE-B2C-002、FE-B2C-003、FE-B2C-004、FE-B2C-005 前端实现及 BE-B2C-001 简历模型与解析服务、BE-B2C-002 JD 模型与解析服务、BE-B2C-003 自动画像生成、BE-B2C-004 面试会话字段扩展；前端移动端适配继承约束继续有效。
 
 ## 1. 文档目标
 
@@ -925,6 +925,8 @@
 
 优先级：P0
 
+状态：已完成（2026-08-23）
+
 任务：
 
 - 扩展 `InterviewSession` 模型和迁移脚本。
@@ -937,6 +939,14 @@
 - 旧测试保持通过。
 - 创建训练模式、实战模式、不同面试类型时状态图收到正确字段。
 - 旧历史会话可以正常打开和生成报告。
+
+完成记录：
+
+- `InterviewSession` 新增 `mode`、`interview_type`、`resume_id`、`parent_session_id`、`source_report_id`、`source_weakness_key`、`session_purpose` 和 `comparison_group_id`；沿用仓库启动期增量迁移机制补齐列与索引，非空枚举字段使用兼容旧数据的数据库默认值。
+- 面试创建 Schema 支持训练/实战模式、五类面试类型、简历/JD、练习来源和对比分组；旧请求默认 `mode=training`、`interview_type=mixed`、`session_purpose=full_interview`，详情及列表接口均返回新字段。
+- 创建会话时校验简历、JD、父会话和来源报告均属于当前用户，且简历/JD 必须已解析；新增 `resume_snapshot_json` 并继续使用 JD 快照，保证后续源数据变化不会影响本场面试和历史报告上下文。
+- `build_state_from_session` 将简历快照、JD 快照、模式、类型、资源 ID、会话用途、父会话、来源报告、短板 key 和对比分组注入 LangGraph 状态；缺失新字段的旧会话确定性降级为训练、综合、完整面试且无简历/JD。
+- 测试覆盖完整字段创建、训练/实战与不同类型校验、快照不可变、状态注入、旧请求与旧状态默认值、列表读取和跨用户来源隔离；`python -m compileall -q app test` 通过，`python -m pytest test -q` 全量 144 项通过。
 
 ### BE-B2C-005 面试规划按类型出题
 

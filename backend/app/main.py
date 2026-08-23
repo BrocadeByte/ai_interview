@@ -120,8 +120,17 @@ async def ensure_interview_session_columns(conn) -> None:
     existing_columns = {row[0] for row in result.fetchall()}
     migrations = {
         "interview_plan_json": "ALTER TABLE interview_sessions ADD COLUMN interview_plan_json TEXT NULL",
+        "mode": "ALTER TABLE interview_sessions ADD COLUMN mode VARCHAR(40) NOT NULL DEFAULT 'training'",
+        "interview_type": "ALTER TABLE interview_sessions ADD COLUMN interview_type VARCHAR(40) NOT NULL DEFAULT 'mixed'",
+        "resume_id": "ALTER TABLE interview_sessions ADD COLUMN resume_id INT NULL",
+        "resume_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN resume_snapshot_json LONGTEXT NULL",
         "job_description_id": "ALTER TABLE interview_sessions ADD COLUMN job_description_id INT NULL",
         "job_description_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN job_description_snapshot_json LONGTEXT NULL",
+        "parent_session_id": "ALTER TABLE interview_sessions ADD COLUMN parent_session_id INT NULL",
+        "source_report_id": "ALTER TABLE interview_sessions ADD COLUMN source_report_id INT NULL",
+        "source_weakness_key": "ALTER TABLE interview_sessions ADD COLUMN source_weakness_key VARCHAR(255) NULL",
+        "session_purpose": "ALTER TABLE interview_sessions ADD COLUMN session_purpose VARCHAR(40) NOT NULL DEFAULT 'full_interview'",
+        "comparison_group_id": "ALTER TABLE interview_sessions ADD COLUMN comparison_group_id VARCHAR(64) NULL",
         "processing_request_id": "ALTER TABLE interview_sessions ADD COLUMN processing_request_id VARCHAR(36) NULL",
         "processing_started_at": "ALTER TABLE interview_sessions ADD COLUMN processing_started_at DATETIME NULL",
     }
@@ -129,13 +138,19 @@ async def ensure_interview_session_columns(conn) -> None:
         if column not in existing_columns:
             await conn.execute(text(statement))
     indexes = (await conn.execute(text("SHOW INDEX FROM interview_sessions"))).fetchall()
-    if not any(str(row[2]) == "ix_interview_sessions_job_description_id" for row in indexes):
-        await conn.execute(
-            text(
-                "ALTER TABLE interview_sessions "
-                "ADD INDEX ix_interview_sessions_job_description_id (job_description_id)"
+    existing_indexes = {str(row[2]) for row in indexes}
+    required_indexes = {
+        "ix_interview_sessions_resume_id": "resume_id",
+        "ix_interview_sessions_job_description_id": "job_description_id",
+        "ix_interview_sessions_parent_session_id": "parent_session_id",
+        "ix_interview_sessions_source_report_id": "source_report_id",
+        "ix_interview_sessions_comparison_group_id": "comparison_group_id",
+    }
+    for index_name, column_name in required_indexes.items():
+        if index_name not in existing_indexes:
+            await conn.execute(
+                text(f"ALTER TABLE interview_sessions ADD INDEX {index_name} ({column_name})")
             )
-        )
 
 
 async def ensure_interview_report_columns(conn) -> None:
