@@ -209,6 +209,25 @@ async def test_graph_finish_path_marks_session_finished(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_retest_plan_finishes_after_two_questions(monkeypatch) -> None:
+    monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
+        '{"needs_followup":false,"decision_reason":"再测完成。","question":"","score":80,'
+        + SUB_SCORES + ',"reason":"r","weaknesses":[],"suggestions":[]}'
+    ]))
+    state = _base_state()
+    state["session_purpose"] = "retest"
+    state["interview_plan"] = [
+        {"dimension": "来源短板再测", "question_count": 2, "weight": 1.0, "focus": "同类能力点"}
+    ]
+    state["current_question_index"] = 2
+
+    result = await interview_graph.ainvoke(state)
+
+    assert result["status"] == "finished"
+    assert "已完成" in result["current_question"]
+
+
+@pytest.mark.anyio
 async def test_string_false_is_rejected_and_uses_fallback(monkeypatch) -> None:
     monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
         '{"needs_followup":"false","decision_reason":"ok","question":"错误问题","score":80,'

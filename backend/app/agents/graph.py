@@ -1,8 +1,7 @@
 from langgraph.graph import END, START, StateGraph
 
-from app.agents.graph_config import MAX_QUESTION_COUNT
 from app.agents.nodes.answer_pipeline import answer_pipeline_node
-from app.agents.nodes.interview_planner import plan_interview_node
+from app.agents.nodes.interview_planner import get_interview_question_count, plan_interview_node
 from app.agents.state import InterviewState
 
 
@@ -30,7 +29,7 @@ def route_after_answer(state: InterviewState) -> str:
     if state["followup_decision"] and state["followup_decision"]["needs_followup"]:
         return "end"
 
-    if state["current_question_index"] >= MAX_QUESTION_COUNT:
+    if state["current_question_index"] >= get_interview_question_count(state["interview_plan"]):
         return "mark_finished"
 
     return "end"

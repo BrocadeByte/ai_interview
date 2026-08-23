@@ -2,8 +2,11 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from app.agents.graph_config import MAX_QUESTION_COUNT
-from app.agents.nodes.interview_planner import DEFAULT_INTERVIEW_PLAN, get_plan_item_for_question
+from app.agents.nodes.interview_planner import (
+    DEFAULT_INTERVIEW_PLAN,
+    get_interview_question_count,
+    get_plan_item_for_question,
+)
 from app.agents.nodes.short_term_memory import format_short_term_memory
 from app.agents.state import InterviewState
 from app.schemas.llm_outputs import AnswerPipelineOutput
@@ -27,6 +30,7 @@ SYSTEM_PROMPT = """
 4. score 使用 0 到 100 的整数；sub_scores 至少包含专业准确性、表达清晰度、项目真实性、岗位匹配度。
 5. reason 说明评分理由；weaknesses 写本题暴露的问题；suggestions 写可执行改进建议。
 6. 一次只问一个问题，不要重复已经问过的主问题或追问。
+7. 训练模式可以用诊断性追问定位回答缺口；实战模式的 question 必须保持真实面试的中性表达，不得透露得分、标准答案、短板或改进建议，但仍需在后台完整输出评分字段供最终报告使用。
 JSON 格式：{
   "needs_followup": false,
   "decision_reason": "是否追问的判断理由",
@@ -97,16 +101,17 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
     answer = _get_last_user_answer(state)
     plan = state["interview_plan"]
     current_index = state["current_question_index"]
+    total_question_count = get_interview_question_count(plan)
     current_plan_item = get_plan_item_for_question(plan, current_index)
     current_dimension = str(state.get("current_dimension") or "").strip() or current_plan_item["dimension"]
 
     # 下一道主问题所属的计划项：不追问时按它归类，避免沿用已答题目维度。
-    next_index = min(current_index + 1, MAX_QUESTION_COUNT)
+    next_index = min(current_index + 1, total_question_count)
     next_plan_item = get_plan_item_for_question(plan, next_index) if plan else DEFAULT_INTERVIEW_PLAN[0]
     next_dimension = next_plan_item["dimension"]
     next_focus = next_plan_item["focus"]
 
-    is_last_question = current_index >= MAX_QUESTION_COUNT
+    is_last_question = current_index >= total_question_count
     reached_max_followup = state["follow_up_count"] >= state["max_follow_up_count"]
 
     history_text = format_short_term_memory(
@@ -143,10 +148,22 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
     if is_last_question:
         followup_instruction += "若不追问，这是最后一题，question 输出空字符串。"
 
+    mode = state.get("mode") or "training"
+    mode_guidance = (
+        "训练模式：可以用诊断性追问定位回答缺口，下一题可结合本轮表现渐进调整；不要直接把标准答案写进问题。"
+        if mode == "training"
+        else "实战模式：追问和下一题保持中性、真实，不得在 question 中透露得分、答案、短板或改进建议；评分只在后台保存。"
+    )
+
     user_prompt = f"""
 目标岗位：{state["target_position"]}
 面试难度：{state["difficulty"]}
-当前题号：{current_index}（最大主问题数 {MAX_QUESTION_COUNT}）
+面试模式：{mode}
+模式反馈策略：{mode_guidance}
+面试类型：{state.get("interview_type", "mixed")}
+会话用途：{state.get("session_purpose", "full_interview")}
+来源短板 key：{format_untrusted_data("source_weakness_key", state.get("source_weakness_key"))}
+当前题号：{current_index}（本场主问题数 {total_question_count}）
 当前考察维度：{current_dimension}
 当前计划考察重点：{current_plan_item["focus"]}
 下一计划考察维度：{next_dimension}

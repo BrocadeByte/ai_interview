@@ -13,8 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.agents.graph import interview_graph
-from app.agents.graph_config import MAX_QUESTION_COUNT
-from app.agents.nodes.interview_planner import get_plan_item_for_question
+from app.agents.nodes.interview_planner import get_interview_question_count, get_plan_item_for_question
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.interview import InterviewMessage, InterviewSession
@@ -593,7 +592,8 @@ async def _process_answer(
 
     question = _validated_visible_question(result["current_question"])
     if _is_duplicate_question(question, session.messages):
-        if is_followup and session.current_question_index >= MAX_QUESTION_COUNT:
+        total_question_count = get_interview_question_count(parse_interview_plan(session.interview_plan_json))
+        if is_followup and session.current_question_index >= total_question_count:
             session.status = "finished"
             question = _validated_visible_question("本次模拟面试已完成。可以查看评分与复盘报告。")
         else:
@@ -778,7 +778,11 @@ def attach_current_plan_fields(session: InterviewSession) -> None:
     plan_item = get_plan_item_for_question(plan if isinstance(plan, list) else [], session.current_question_index)
     setattr(session, "current_dimension", plan_item.get("dimension"))
     setattr(session, "current_plan_focus", plan_item.get("focus"))
-    setattr(session, "total_question_count", MAX_QUESTION_COUNT)
+    setattr(
+        session,
+        "total_question_count",
+        get_interview_question_count(plan if isinstance(plan, list) else []),
+    )
 
 
 def _validated_visible_question(value: object) -> str:
