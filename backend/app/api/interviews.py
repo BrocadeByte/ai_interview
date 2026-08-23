@@ -24,6 +24,7 @@ from app.models.resume import Resume
 from app.models.user import User
 from app.schemas.interview import InterviewAnswer, InterviewCreate, InterviewListItem, InterviewSessionRead, InterviewWarmup
 from app.schemas.llm_outputs import VisibleQuestionOutput
+from app.schemas.question_review import QuestionReviewRead
 from app.schemas.report import InterviewReportRead
 from app.schemas.score import InterviewScoreRead
 from app.services.interview_answer_service import (
@@ -45,6 +46,7 @@ from app.services.llm_stream import (
     set_stream_delta_callback,
     set_stream_text_done_callback,
 )
+from app.services.question_review_service import ensure_question_reviews
 from app.services.score_service import list_scores, save_latest_score
 from app.rag.embeddings import embed_text
 from app.rag.retriever import ensure_collection
@@ -348,6 +350,23 @@ async def get_interview_scores(
 ) -> list[InterviewScoreRead]:
     await _load_session(db, current_user.id, session_id)
     return await list_scores(db, session_id)
+
+
+@router.get("/{session_id}/question-reviews", response_model=list[QuestionReviewRead])
+async def get_interview_question_reviews(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[QuestionReviewRead]:
+    """Generate the report if needed, then return its stable per-score reviews."""
+    await _load_session(db, current_user.id, session_id)
+    report_read = await get_or_create_report(db, session_id)
+    report = await db.get(InterviewReport, report_read.id)
+    if report is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    reviews = await ensure_question_reviews(db, report)
+    await db.commit()
+    return reviews
 
 
 # 获取或生成指定面试的报告。

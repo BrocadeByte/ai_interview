@@ -261,6 +261,9 @@ async def test_report_keeps_saved_snapshot_when_knowledge_source_changes(monkeyp
     async def stored_scores(db, session_id):
         return [_StoredScore()]
 
+    async def no_question_reviews(db, report):
+        return []
+
     async def generate(*args, **kwargs):
         nonlocal generation_calls
         generation_calls += 1
@@ -283,6 +286,7 @@ async def test_report_keeps_saved_snapshot_when_knowledge_source_changes(monkeyp
     monkeypatch.setattr(report_service, "_list_messages", no_messages)
     monkeypatch.setattr(report_service, "list_scores", stored_scores)
     monkeypatch.setattr(report_service, "generate_report", generate)
+    monkeypatch.setattr(report_service, "ensure_question_reviews", no_question_reviews)
     db = _FakeReportDb()
 
     first = await report_service.get_or_create_report(db, 9)

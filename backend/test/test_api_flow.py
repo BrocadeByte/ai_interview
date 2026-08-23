@@ -171,6 +171,15 @@ async def test_register_profile_interview_answer_report_flow(client: AsyncClient
     assert scores[0]["score"] == 82
     assert scores[0]["dimension"] == "项目经验"
 
+    second_answer_response = await client.post(
+        f"/api/interviews/{interview['id']}/answer",
+        headers=headers,
+        json={"answer": "我通过统一异常处理和审计日志完善了鉴权链路。", "request_id": str(uuid4())},
+    )
+    assert second_answer_response.status_code == 200
+    scores = (await client.get(f"/api/interviews/{interview['id']}/scores", headers=headers)).json()
+    assert len(scores) == 2
+
     report_response = await client.get(f"/api/interviews/{interview['id']}/report", headers=headers)
     assert report_response.status_code == 200
     report = report_response.json()
@@ -179,7 +188,85 @@ async def test_register_profile_interview_answer_report_flow(client: AsyncClient
     assert report["dimension_scores"]
     assert report["dimension_scores"][0]["dimension"] == "项目经验"
     assert report["dimension_scores"][0]["score"] == 82
-    assert report["dimension_scores"][0]["question_indexes"] == [1]
+    assert report["dimension_scores"][0]["question_indexes"] == [1, 2]
+
+    report_reviews_response = await client.get(
+        f"/api/reports/{report['id']}/question-reviews",
+        headers=headers,
+    )
+    assert report_reviews_response.status_code == 200
+    report_reviews = report_reviews_response.json()
+    assert len(report_reviews) == len(scores) == 2
+    assert {item["score_id"] for item in report_reviews} == {item["id"] for item in scores}
+    assert all(item["question"] for item in report_reviews)
+    assert all(item["answer"] for item in report_reviews)
+    assert all(item["deduction_reasons"] for item in report_reviews)
+    assert all(item["suggested_structure"] for item in report_reviews)
+    assert all(item["sample_answer"] for item in report_reviews)
+    assert all("[真实" in item["sample_answer"] for item in report_reviews)
+
+    session_reviews_response = await client.get(
+        f"/api/interviews/{interview['id']}/question-reviews",
+        headers=headers,
+    )
+    assert session_reviews_response.status_code == 200
+    session_reviews = session_reviews_response.json()
+    assert [item["id"] for item in session_reviews] == [item["id"] for item in report_reviews]
+    assert [item["sample_answer"] for item in session_reviews] == [
+        item["sample_answer"] for item in report_reviews
+    ]
+
+    async with test_session_factory() as db:
+        stored_review_count = await db.scalar(
+            text("SELECT COUNT(*) FROM question_reviews WHERE report_id = :report_id"),
+            {"report_id": report["id"]},
+        )
+    assert stored_review_count == 2
+
+    first_snapshot = report_reviews[0]
+    async with test_session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE interview_scores SET answer = :answer, reason = :reason "
+                "WHERE id = :score_id"
+            ),
+            {
+                "score_id": first_snapshot["score_id"],
+                "answer": "后续修改的评分来源回答",
+                "reason": "后续修改的评分来源原因",
+            },
+        )
+        await db.commit()
+    stable_reviews = (
+        await client.get(f"/api/reports/{report['id']}/question-reviews", headers=headers)
+    ).json()
+    assert stable_reviews[0]["answer"] == first_snapshot["answer"]
+    assert stable_reviews[0]["deduction_reasons"] == first_snapshot["deduction_reasons"]
+    assert stable_reviews[0]["sample_answer"] == first_snapshot["sample_answer"]
+
+    async with test_session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE question_reviews SET suggested_structure_json = '[]', sample_answer = '' "
+                "WHERE id = :review_id"
+            ),
+            {"review_id": first_snapshot["id"]},
+        )
+        await db.commit()
+    repaired_reviews = (
+        await client.get(f"/api/reports/{report['id']}/question-reviews", headers=headers)
+    ).json()
+    assert repaired_reviews[0]["suggested_structure"]
+    assert repaired_reviews[0]["sample_answer"]
+    assert "[真实" in repaired_reviews[0]["sample_answer"]
+
+    other_headers = await register_and_fill_profile(client)
+    assert (
+        await client.get(f"/api/reports/{report['id']}/question-reviews", headers=other_headers)
+    ).status_code == 404
+    assert (
+        await client.get(f"/api/interviews/{interview['id']}/question-reviews", headers=other_headers)
+    ).status_code == 404
 
 
 @pytest.mark.anyio

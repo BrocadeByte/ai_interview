@@ -10,6 +10,7 @@ from app.models.interview import InterviewMessage, InterviewSession
 from app.models.report import InterviewReport
 from app.schemas.report import InterviewReportRead
 from app.services.citation_service import citations_from_json, citations_to_json, merge_citations
+from app.services.question_review_service import ensure_question_reviews
 from app.services.score_service import list_scores
 
 
@@ -19,6 +20,7 @@ async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewRe
     if existing:
         session = await db.get(InterviewSession, session_id)
         await repair_report_if_incomplete(db, existing, session)
+        await ensure_question_reviews(db, existing)
         return _report_to_read(existing)
 
     messages = await _list_messages(db, session_id)
@@ -43,6 +45,7 @@ async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewRe
     )
     db.add(report)
     await db.flush()
+    await ensure_question_reviews(db, report)
     return _report_to_read(report)
 
 
