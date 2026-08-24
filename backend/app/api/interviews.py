@@ -18,6 +18,7 @@ from app.agents.nodes.interview_planner import get_plan_item_for_question
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.interview import InterviewMessage, InterviewSession
+from app.models.job_description import JobDescription
 from app.models.profile import UserProfile
 from app.models.user import User
 from app.schemas.interview import InterviewAnswer, InterviewCreate, InterviewListItem, InterviewSessionRead, InterviewWarmup
@@ -32,6 +33,7 @@ from app.services.interview_answer_service import (
     release_answer_lease,
 )
 from app.services.interview_state_service import build_state_from_session
+from app.services.job_description_service import build_job_description_snapshot
 from app.services.interview_memory_service import maybe_compact_medium_term_memory
 from app.services.report_service import get_or_create_report
 from app.services.llm_stream import (
@@ -81,12 +83,31 @@ async def create_interview(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewSession:
-    """创建仅含岗位和难度的待启动会话，面试计划与首题在 start 阶段生成。"""
+    """创建待启动会话，并冻结用户选中的 JD 快照。"""
+    job_description = None
+    if payload.job_description_id is not None:
+        job_description = await db.scalar(
+            select(JobDescription).where(
+                JobDescription.id == payload.job_description_id,
+                JobDescription.user_id == current_user.id,
+            )
+        )
+        if job_description is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job description not found")
+        if job_description.status != "parsed":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only a parsed job description can be used for an interview",
+            )
     session = InterviewSession(
         user_id=current_user.id,
         target_position=payload.target_position,
         difficulty=payload.difficulty,
         status="preparing",
+        job_description_id=job_description.id if job_description else None,
+        job_description_snapshot_json=(
+            build_job_description_snapshot(job_description) if job_description else None
+        ),
     )
     db.add(session)
     await db.commit()

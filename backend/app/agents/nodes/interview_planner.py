@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """
-你是一个专业的 AI 面试规划器和面试官。你要根据候选人画像、目标岗位、面试难度和知识库内容，生成第一道题并规划本场面试的考察维度。
+你是一个专业的 AI 面试规划器和面试官。你要根据候选人画像、本场绑定的 JD 快照、目标岗位、面试难度和知识库内容，生成第一道题并规划本场面试的考察维度。
 要求：
-1. question 必须贴合候选人经历、目标岗位和第一个计划维度，一次只问一个具体问题。
+1. question 必须贴合候选人经历、目标岗位、JD 硬性要求和第一个计划维度，一次只问一个具体问题。
 2. 总主问题数必须等于 8。
 3. 每个维度必须包含 dimension、question_count、weight、focus。
 4. 维度要覆盖项目经验、岗位专业能力、系统设计或工程实践、问题排查与协作。
@@ -84,6 +84,7 @@ async def plan_interview_node(state: InterviewState) -> dict:
 目标岗位：{state["target_position"]}
 面试难度：{state["difficulty"]}
 候选人画像：{format_untrusted_data("candidate_profile", state["profile"])}
+本场 JD 快照：{format_untrusted_data("job_description_snapshot", state["target_job"])}
 
 知识库参考：
 {format_untrusted_data("retrieved_knowledge_context", knowledge_text)}

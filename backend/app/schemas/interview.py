@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class InterviewCreate(BaseModel):
     target_position: str = Field(min_length=1, max_length=160)
     difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
+    job_description_id: int | None = Field(default=None, gt=0)
 
 
 class InterviewWarmup(BaseModel):
@@ -41,6 +42,7 @@ class InterviewSessionRead(BaseModel):
     current_dimension: str | None = None
     current_plan_focus: str | None = None
     total_question_count: int = 8
+    job_description_id: int | None = None
     created_at: datetime
     updated_at: datetime
     messages: list[InterviewMessageRead] = []
