@@ -23,4 +23,5 @@ class User(Base):
         cascade="all, delete-orphan",
     )
     interview_sessions: Mapped[list["InterviewSession"]] = relationship(back_populates="user")
+    resumes: Mapped[list["Resume"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 

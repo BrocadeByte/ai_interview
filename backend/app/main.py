@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 import app.models  # noqa: F401
-from app.api import auth, interviews, knowledge, knowledge_async, profiles, reports
+from app.api import auth, interviews, knowledge, knowledge_async, profiles, reports, resumes
 from app.core.config import settings
 from app.core.database import Base, engine
 from app.rag.embeddings import close_embedding_session
@@ -173,5 +173,6 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(interviews.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+app.include_router(resumes.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
 app.include_router(knowledge_async.router, prefix="/api")
