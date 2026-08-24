@@ -26,12 +26,50 @@ from app.models.score import InterviewScore  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.services.question_review_service import build_question_review_payload  # noqa: E402
 from app.services.interview_state_service import build_state_from_session  # noqa: E402
-from app.services.practice_service import sync_practice_for_interview  # noqa: E402
+from app.services.practice_service import (  # noqa: E402
+    _compare_weaknesses,
+    _same_weakness,
+    sync_practice_for_interview,
+)
 
 
 practice_app = FastAPI()
 practice_app.include_router(interviews_api.router, prefix="/api")
 practice_app.include_router(practice_api.router, prefix="/api")
+
+
+def test_weakness_comparison_treats_synonymous_wording_as_the_same_issue() -> None:
+    assert _same_weakness("缺少量化结果", "没有给出可量化的结果")
+
+    resolved, remaining = _compare_weaknesses(
+        ["缺少量化结果"],
+        ["没有给出可量化的结果"],
+        target_title="缺少量化结果",
+        target_improved=True,
+    )
+
+    assert resolved == []
+    assert remaining == ["没有给出可量化的结果"]
+
+
+def test_weakness_comparison_requires_target_improvement_and_keeps_sets_disjoint() -> None:
+    unresolved, remaining = _compare_weaknesses(
+        ["缺少量化结果"],
+        [],
+        target_title="缺少量化结果",
+        target_improved=False,
+    )
+    assert unresolved == []
+    assert remaining == ["缺少量化结果"]
+
+    resolved, remaining = _compare_weaknesses(
+        ["缺少量化结果"],
+        [],
+        target_title="缺少量化结果",
+        target_improved=True,
+    )
+    assert resolved == ["缺少量化结果"]
+    assert remaining == []
 
 
 @pytest.fixture(scope="module")
@@ -188,6 +226,10 @@ async def test_report_weakness_creates_isolated_practice_with_frozen_source(test
     created = response.json()
     assert created["status"] == "not_started"
     assert created["practice_session_id"]
+    comparison = (await client.get(f"/api/practice/{created['id']}/comparison")).json()
+    assert comparison["status"] == "not_started"
+    assert comparison["practice_session_id"] == created["practice_session_id"]
+    assert comparison["retest_session_id"] is None
     async with session_factory() as db:
         practice = await db.get(PracticeSession, created["id"])
         session = await db.get(InterviewSession, created["practice_session_id"])

@@ -472,16 +472,14 @@ async def _freeze_comparison(
     before_weaknesses = _string_list(before.get("weaknesses"))
     after_weaknesses = _string_list(after.get("weaknesses"))
     score_delta = int(after["score"]) - int(before.get("score") or 0)
-    resolved: list[str] = []
-    remaining = list(after_weaknesses)
-    for item in before_weaknesses:
-        if any(_same_weakness(item, current) for current in after_weaknesses):
-            continue
-        if score_delta > 0:
-            resolved.append(item)
-        else:
-            remaining.append(item)
-    remaining = _unique_text(remaining)
+    target_score = _target_dimension_score(scores, practice.target_dimension)
+    target_improved = target_score is not None and target_score > int(before.get("score") or 0)
+    resolved, remaining = _compare_weaknesses(
+        before_weaknesses,
+        after_weaknesses,
+        target_title=practice.weakness_title,
+        target_improved=target_improved,
+    )
     before_sub_scores = _int_dict(before.get("sub_scores"))
     after_sub_scores = _int_dict(after.get("sub_scores"))
     sub_score_delta = {
@@ -492,6 +490,8 @@ async def _freeze_comparison(
         "practice_id": practice.id,
         "status": "completed",
         "source_report_id": practice.source_report_id,
+        "practice_session_id": practice.practice_session_id,
+        "retest_session_id": practice.retest_session_id,
         "weakness_title": practice.weakness_title,
         "before": before,
         "after": after,
@@ -523,6 +523,8 @@ def _pending_comparison(practice: PracticeSession) -> dict[str, Any]:
         "practice_id": practice.id,
         "status": practice.status,
         "source_report_id": practice.source_report_id,
+        "practice_session_id": practice.practice_session_id,
+        "retest_session_id": practice.retest_session_id,
         "weakness_title": practice.weakness_title,
         "before": before,
         "after": None,
@@ -632,6 +634,10 @@ def _find_exact_index(values: list[str], target: str) -> int:
 
 
 def _same_weakness(left: str, right: str) -> bool:
+    left_key = _canonical_weakness_key(left)
+    right_key = _canonical_weakness_key(right)
+    if left_key and left_key == right_key:
+        return True
     left_normalized = _normalize_text(left)
     right_normalized = _normalize_text(right)
     if not left_normalized or not right_normalized:
@@ -641,6 +647,63 @@ def _same_weakness(left: str, right: str) -> bool:
     return min(len(left_normalized), len(right_normalized)) >= 4 and (
         left_normalized in right_normalized or right_normalized in left_normalized
     )
+
+
+def _canonical_weakness_key(value: str) -> str:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return ""
+    concept_markers = (
+        ("quantified_result", ("量化", "数据结果", "结果指标", "数值结果", "百分比")),
+        ("tradeoff", ("取舍", "权衡", "方案对比", "选择依据", "选型依据")),
+        ("personal_contribution", ("个人贡献", "本人贡献", "个人职责", "自己负责", "职责边界")),
+        ("validation", ("验证", "压测", "测试依据", "验证依据")),
+        ("answer_structure", ("回答结构", "表达结构", "逻辑结构", "条理")),
+        ("technical_detail", ("技术细节", "实现细节", "具体实现", "深度不足")),
+        ("communication_clarity", ("表达不清", "表达模糊", "不够清晰", "过于冗长")),
+        ("job_match", ("岗位匹配", "职位匹配", "岗位要求", "jd匹配")),
+    )
+    for key, markers in concept_markers:
+        if any(marker in normalized for marker in markers):
+            return key
+    return normalized
+
+
+def _compare_weaknesses(
+    before: list[str],
+    after: list[str],
+    *,
+    target_title: str,
+    target_improved: bool,
+) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
+    remaining = list(after)
+    for item in before:
+        if any(_same_weakness(item, current) for current in after):
+            continue
+        if target_improved and _same_weakness(item, target_title):
+            resolved.append(item)
+        else:
+            remaining.append(item)
+    resolved = _unique_text(resolved)
+    remaining = [
+        item
+        for item in _unique_text(remaining)
+        if not any(_same_weakness(item, resolved_item) for resolved_item in resolved)
+    ]
+    return resolved, remaining
+
+
+def _target_dimension_score(scores: list[InterviewScore], target_dimension: str) -> int | None:
+    target = _normalize_text(target_dimension)
+    matching = [
+        score.score
+        for score in scores
+        if target and _normalize_text(score.dimension) == target
+    ]
+    if not matching:
+        return None
+    return round(sum(matching) / len(matching))
 
 
 def _normalize_text(value: str) -> str:

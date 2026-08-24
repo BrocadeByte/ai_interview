@@ -12,6 +12,7 @@ import { getApiErrorMessage } from '../api/client'
 import {
   createPracticeFromReport,
   fetchPracticeComparison,
+  startPractice,
   startPracticeRetest,
   type PracticeComparison
 } from '../api/practice'
@@ -23,10 +24,53 @@ const comparison = ref<PracticeComparison | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const continuing = ref(false)
+const openingPractice = ref(false)
 const startingRetest = ref(false)
 
 const practiceId = computed(() => Number(route.params.id))
 const isPending = computed(() => !comparison.value?.after)
+const comparisonState = computed(() => {
+  const data = comparison.value
+  if (!data) return { tag: '', title: '', description: '', type: 'info' as const }
+  if (data.status === 'not_started') {
+    return {
+      tag: '未开始',
+      title: '专项练习尚未开始',
+      description: '先完成针对该短板的专项练习，之后才能进入同类能力点再测。',
+      type: 'info' as const
+    }
+  }
+  if (data.status === 'practicing') {
+    return {
+      tag: '训练中',
+      title: '专项练习进行中',
+      description: '继续完成当前专项练习；练习结束后，本页会开放再测入口。',
+      type: 'warning' as const
+    }
+  }
+  if (data.status === 'ready_for_retest') {
+    return {
+      tag: '待再测',
+      title: '专项练习已完成',
+      description: '开始同类能力点再测，完成后系统会在这里生成前后对比。',
+      type: 'warning' as const
+    }
+  }
+  if (!data.after) {
+    return {
+      tag: '结果异常',
+      title: '再测结果暂不可用',
+      description: '练习状态已完成，但没有读取到再测结果。请重新加载；若问题持续，请稍后重试。',
+      type: 'danger' as const
+    }
+  }
+  return {
+    tag: '再测已完成',
+    title: '',
+    description: data.summary || '再测结果已生成，请结合下方明细继续巩固。',
+    type: 'success' as const
+  }
+})
 const scoreDelta = computed(() => comparison.value?.delta.score || 0)
 const scoreDeltaLabel = computed(() => scoreDelta.value > 0 ? `+${scoreDelta.value}` : String(scoreDelta.value))
 const structureRows = computed(() => {
@@ -111,6 +155,20 @@ async function beginRetest() {
   }
 }
 
+async function beginOrContinuePractice() {
+  if (!comparison.value || openingPractice.value) return
+  openingPractice.value = true
+  try {
+    const { data } = await startPractice(practiceId.value)
+    rememberInterview(data)
+    await router.push(`/interviews/${data.id}`)
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '打开专项练习失败'))
+  } finally {
+    openingPractice.value = false
+  }
+}
+
 function sessionRoute(sessionId: number) {
   return `/interviews/${sessionId}`
 }
@@ -149,11 +207,11 @@ onMounted(load)
       <template v-else-if="comparison">
         <section class="comparison-score-card" :class="{ pending: isPending }">
           <div class="comparison-score-copy">
-            <el-tag :type="isPending ? 'warning' : 'success'" effect="light">
-              {{ isPending ? '待再测' : '再测已完成' }}
+            <el-tag :type="comparisonState.type" effect="light">
+              {{ comparisonState.tag }}
             </el-tag>
             <h2>{{ comparison.weakness_title || '专项训练结果' }}</h2>
-            <p>{{ isPending ? '专项练习已记录，完成再测后将在这里生成分数、短板和回答结构对比。' : (comparison.summary || '再测结果已生成，请结合下方明细继续巩固。') }}</p>
+            <p>{{ comparisonState.description }}</p>
           </div>
           <div class="score-comparison" aria-label="训练前后得分">
             <button type="button" @click="router.push(sessionRoute(comparison.before.session_id))">
@@ -182,12 +240,28 @@ onMounted(load)
         <el-result
           v-if="isPending"
           icon="info"
-          title="待完成再测"
-          sub-title="当前没有再测结果。完成同类能力点再测后，系统会自动跳转回本页。"
+          :title="comparisonState.title"
+          :sub-title="comparisonState.description"
           class="pending-retest-panel"
         >
           <template #extra>
-            <el-button type="primary" :loading="startingRetest" @click="beginRetest">开始再测</el-button>
+            <el-button
+              v-if="comparison.status === 'not_started' || comparison.status === 'practicing'"
+              type="primary"
+              :loading="openingPractice"
+              @click="beginOrContinuePractice"
+            >
+              {{ comparison.status === 'not_started' ? '开始专项练习' : '继续专项练习' }}
+            </el-button>
+            <el-button
+              v-else-if="comparison.status === 'ready_for_retest'"
+              type="primary"
+              :loading="startingRetest"
+              @click="beginRetest"
+            >
+              开始再测
+            </el-button>
+            <el-button v-else type="primary" @click="load">重新加载</el-button>
             <el-button @click="router.push('/reports')">查看训练报告</el-button>
           </template>
         </el-result>

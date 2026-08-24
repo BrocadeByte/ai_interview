@@ -2,10 +2,10 @@ import { defineStore } from 'pinia'
 
 import {
   fetchMe,
+  fetchSession,
   login,
   logoutAllSessions,
   logoutSession,
-  refreshSession,
   register,
   type User
 } from '../api/auth'
@@ -38,11 +38,11 @@ export const useAuthStore = defineStore('auth', {
     async initialize() {
       if (this.initialized) return
       try {
-        if (this.token) {
-          await this.loadMe()
-        } else {
-          const { data } = await refreshSession()
+        const { data } = await fetchSession()
+        if (data.authenticated && data.access_token && data.user) {
           this.setSession(data.access_token, data.user)
+        } else {
+          this.clearSession()
         }
       } catch {
         this.clearSession()

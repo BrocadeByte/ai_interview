@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     rabbitmq_prefetch_count: int = 2
     knowledge_ingestion_max_attempts: int = 3
     rabbitmq_connect_timeout_seconds: int = 10
+    healthcheck_timeout_seconds: float = 2.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

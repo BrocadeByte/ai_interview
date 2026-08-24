@@ -65,6 +65,8 @@ export interface PracticeComparison {
   practice_id: number
   status: PracticeStatus
   source_report_id?: number | null
+  practice_session_id?: number | null
+  retest_session_id?: number | null
   weakness_title?: string | null
   before: PracticeComparisonSession
   after: PracticeComparisonSession | null

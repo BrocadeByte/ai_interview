@@ -67,6 +67,8 @@ class PracticeComparisonRead(BaseModel):
     practice_id: int
     status: PracticeStatus
     source_report_id: int
+    practice_session_id: int | None = None
+    retest_session_id: int | None = None
     weakness_title: str
     before: PracticeComparisonSession
     after: PracticeComparisonSession | None = None

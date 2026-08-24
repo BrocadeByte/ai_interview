@@ -80,7 +80,9 @@ uvicorn app.main:app --reload
 健康检查：
 
 ```text
-GET http://127.0.0.1:8000/api/health
+GET http://127.0.0.1:8000/api/health/live   # 进程存活
+GET http://127.0.0.1:8000/api/health/ready  # 数据库、Qdrant、RabbitMQ 就绪状态
+GET http://127.0.0.1:8000/api/health        # 兼容旧部署，等同 ready
 ```
 
 ## 前端启动
@@ -97,6 +99,7 @@ npm run dev
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `GET /api/auth/session`
 - `GET /api/auth/me`
 - `GET /api/profile/me`
 - `PUT /api/profile/me`

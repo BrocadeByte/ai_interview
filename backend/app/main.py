@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 import logging
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
@@ -14,6 +15,7 @@ from app.core.config import settings
 from app.core.database import Base, engine
 from app.rag.embeddings import close_embedding_session
 from app.rag.retriever import close_retriever_client, warm_retriever
+from app.services.health_service import readiness_status
 
 
 logging.basicConfig(
@@ -227,9 +229,21 @@ app.add_middleware(
 )
 
 
-@app.get("/api/health")
-def health() -> dict[str, str]:
+@app.get("/api/health/live")
+def health_live() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/health/ready")
+async def health_ready() -> JSONResponse:
+    payload, status_code = await readiness_status()
+    return JSONResponse(content=payload, status_code=status_code)
+
+
+@app.get("/api/health")
+async def health() -> JSONResponse:
+    """Backward-compatible readiness endpoint for existing deployment checks."""
+    return await health_ready()
 
 
 app.include_router(auth.router, prefix="/api")

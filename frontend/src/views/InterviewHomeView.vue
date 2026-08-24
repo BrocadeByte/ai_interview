@@ -54,6 +54,10 @@ const interviewTypeOptions: Array<{ label: string; value: InterviewType }> = [
 ]
 let warmupTimer: ReturnType<typeof setTimeout> | null = null
 let lastWarmedPosition = ''
+let profileGenerationSequence = 0
+let profileMaterialRevision = 0
+
+class StaleProfileGenerationError extends Error {}
 
 const finishedCount = computed(() => sessions.value.filter((session) => session.status === 'finished').length)
 const activeCount = computed(() => sessions.value.filter((session) => session.status !== 'finished').length)
@@ -106,11 +110,36 @@ watch(() => form.target_position, scheduleWarmup)
 onMounted(load)
 onBeforeUnmount(() => {
   if (warmupTimer) clearTimeout(warmupTimer)
+  profileGenerationSequence += 1
 })
 
-function invalidateGeneratedProfile(source: 'resume' | 'job-description') {
+function profileMaterialKey() {
+  const file = selectedResumeFile.value
+  const fileKey = file
+    ? `${file.name}:${file.size}:${file.lastModified}:${file.type}`
+    : ''
+  return JSON.stringify({
+    resumeText: resumeText.value.trim(),
+    fileKey,
+    jobDescriptionText: jobDescriptionText.value.trim(),
+    targetPosition: form.target_position.trim()
+  })
+}
+
+function assertCurrentProfileGeneration(sequence: number, revision: number, materialKey: string) {
+  if (
+    sequence !== profileGenerationSequence
+    || revision !== profileMaterialRevision
+    || materialKey !== profileMaterialKey()
+  ) {
+    throw new StaleProfileGenerationError('画像生成期间材料已变化')
+  }
+}
+
+function invalidateGeneratedProfile(source: 'resume' | 'job-description' | 'target-position') {
+  profileMaterialRevision += 1
   if (source === 'resume') resumeId.value = null
-  else jobDescriptionId.value = null
+  else if (source === 'job-description') jobDescriptionId.value = null
   profileDraft.value = null
   profileConfirmed.value = false
 }
@@ -121,6 +150,10 @@ function onResumeTextInput() {
 
 function onJobDescriptionInput() {
   invalidateGeneratedProfile('job-description')
+}
+
+function onTargetPositionInput() {
+  invalidateGeneratedProfile('target-position')
 }
 
 function chooseResumeFile() {
@@ -157,6 +190,9 @@ async function generateProfileDraft() {
     ElMessage.info('请先粘贴或上传简历，或粘贴目标岗位 JD')
     return
   }
+  const generationSequence = ++profileGenerationSequence
+  const materialRevision = profileMaterialRevision
+  const materialKey = profileMaterialKey()
   preparingProfile.value = true
   profileConfirmed.value = false
   try {
@@ -166,6 +202,7 @@ async function generateProfileDraft() {
 
     if (!nextResumeId && selectedResumeFile.value) {
       const { data } = await uploadResume(selectedResumeFile.value)
+      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
       nextResumeId = data.id
       resumeId.value = data.id
@@ -175,6 +212,7 @@ async function generateProfileDraft() {
         title: `粘贴简历 ${new Date().toLocaleDateString('zh-CN')}`,
         content: resumeText.value.trim()
       })
+      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
       nextResumeId = data.id
       resumeId.value = data.id
@@ -186,6 +224,7 @@ async function generateProfileDraft() {
         raw_text: jobDescriptionText.value.trim(),
         title: detectedPosition || '目标岗位 JD'
       })
+      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       nextJobDescriptionId = data.id
       jobDescriptionId.value = data.id
       const parsedPosition = data.target_position || data.parsed?.target_position || data.parsed_json?.target_position
@@ -197,14 +236,19 @@ async function generateProfileDraft() {
       ...(nextJobDescriptionId ? { job_description_id: nextJobDescriptionId } : {}),
       ...(detectedPosition ? { target_position: detectedPosition } : {})
     })
+    assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
     profileDraft.value = { ...draft, warnings: draft.warnings || [] }
     const draftPosition = draft.profile_patch.target_position?.trim() || detectedPosition
     if (draftPosition) form.target_position = draftPosition
     ElMessage.success('自动画像草稿已生成')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : getApiErrorMessage(error, '画像生成失败，请检查输入后重试'))
+    if (error instanceof StaleProfileGenerationError) {
+      ElMessage.info('材料已变化，旧画像结果已作废，请基于最新材料重新生成')
+    } else {
+      ElMessage.error(error instanceof Error ? error.message : getApiErrorMessage(error, '画像生成失败，请检查输入后重试'))
+    }
   } finally {
-    preparingProfile.value = false
+    if (generationSequence === profileGenerationSequence) preparingProfile.value = false
   }
 }
 
@@ -337,6 +381,7 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
                     resize="vertical"
                     placeholder="粘贴教育背景、技能和项目经历…"
                     aria-label="粘贴简历文本"
+                    :disabled="preparingProfile"
                     @input="onResumeTextInput"
                   />
                   <div class="file-picker-row">
@@ -352,7 +397,7 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
                     <span v-if="!selectedResumeFile" class="file-help">PDF / TXT / MD，最大 10MB</span>
                     <span v-else class="selected-file" :title="selectedResumeFile.name">
                       {{ selectedResumeFile.name }}
-                      <button type="button" aria-label="移除已选简历文件" @click="removeResumeFile">移除</button>
+                      <button type="button" aria-label="移除已选简历文件" :disabled="preparingProfile" @click="removeResumeFile">移除</button>
                     </span>
                   </div>
                 </article>
@@ -370,6 +415,7 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
                     resize="vertical"
                     placeholder="粘贴目标岗位的完整职位描述…"
                     aria-label="粘贴目标岗位 JD"
+                    :disabled="preparingProfile"
                     @input="onJobDescriptionInput"
                   />
                   <p class="source-help">JD 会作为不可信数据解析，不会被当作系统指令执行。</p>
@@ -419,7 +465,15 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
                 <h3 id="training-settings-heading">训练设置</h3>
               </div>
             <el-form-item label="目标岗位">
-              <el-input v-model="form.target_position" maxlength="160" placeholder="例如：前端开发工程师" :prefix-icon="Position" size="large" />
+              <el-input
+                v-model="form.target_position"
+                maxlength="160"
+                placeholder="例如：前端开发工程师"
+                :prefix-icon="Position"
+                :disabled="preparingProfile"
+                size="large"
+                @input="onTargetPositionInput"
+              />
             </el-form-item>
             <el-form-item label="面试难度">
               <el-segmented

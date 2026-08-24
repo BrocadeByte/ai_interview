@@ -31,3 +31,11 @@ class Token(BaseModel):
     expires_in: int
     user: UserRead
 
+
+class SessionStatus(BaseModel):
+    authenticated: bool
+    access_token: str | None = None
+    token_type: str | None = None
+    expires_in: int | None = None
+    user: UserRead | None = None
+

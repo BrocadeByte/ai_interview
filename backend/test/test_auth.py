@@ -95,6 +95,53 @@ def test_token_types_are_not_interchangeable() -> None:
 
 
 @pytest.mark.anyio
+async def test_session_probe_is_anonymous_safe_and_renews_valid_session(
+    client: AsyncClient,
+) -> None:
+    anonymous = await client.get("/api/auth/session")
+    assert anonymous.status_code == 200
+    assert anonymous.json()["authenticated"] is False
+    assert anonymous.headers["cache-control"] == "no-store"
+
+    registered = await _register(client)
+    previous_refresh = client.cookies.get(settings.refresh_cookie_name)
+    assert previous_refresh
+
+    active = await client.get("/api/auth/session")
+    assert active.status_code == 200
+    assert active.headers["cache-control"] == "no-store"
+    payload = active.json()
+    assert payload["authenticated"] is True
+    assert payload["user"]["id"] == registered.json()["user"]["id"]
+    assert payload["access_token"]
+    assert client.cookies.get(settings.refresh_cookie_name) != previous_refresh
+    assert (
+        await client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {payload['access_token']}"},
+        )
+    ).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_session_probe_clears_expired_or_invalid_refresh_without_401(
+    client: AsyncClient,
+) -> None:
+    client.cookies.set(
+        settings.refresh_cookie_name,
+        "invalid-refresh-token",
+        domain="testserver.local",
+        path=settings.auth_cookie_path,
+    )
+    response = await client.get("/api/auth/session")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["authenticated"] is False
+    assert client.cookies.get(settings.refresh_cookie_name) is None
+
+
+@pytest.mark.anyio
 async def test_register_sets_refresh_cookie_and_expired_access_can_refresh(client: AsyncClient) -> None:
     response = await _register(client)
     payload = response.json()
