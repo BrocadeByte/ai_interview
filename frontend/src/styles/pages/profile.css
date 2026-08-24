@@ -15,8 +15,12 @@
 .profile-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 22px;
+  gap: 18px 22px;
   margin-top: 24px;
+}
+
+.profile-grid .el-form-item {
+  margin-bottom: 0;
 }
 
 .profile-grid .el-input-number {
@@ -38,9 +42,26 @@
   padding: 14px 16px 14px 20px;
   background: rgb(255 255 255 / 96%);
   border: 1px solid var(--line-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
   backdrop-filter: blur(12px);
+}
+
+.privacy-tag {
+  max-width: 100%;
+  min-height: 30px;
+  height: auto;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.privacy-tag .el-icon {
+  flex: 0 0 auto;
+  margin: 0;
 }
 
 .sticky-form-actions > span {

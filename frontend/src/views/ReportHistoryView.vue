@@ -39,7 +39,7 @@ onMounted(load)
     <section class="content report-history">
       <header class="section-header">
         <div>
-          <span class="eyebrow">PERFORMANCE ARCHIVE</span>
+          <span class="eyebrow">训练报告</span>
           <h1>训练报告</h1>
           <p>复盘每次岗位定制训练，持续观察能力变化与下一步提升方向。</p>
         </div>

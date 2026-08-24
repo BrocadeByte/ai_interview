@@ -20,12 +20,12 @@
 
   .auth-page {
     display: block;
-    background: #fff;
+    background: #f5f7fa;
   }
 
   .auth-showcase {
-    min-height: 280px;
-    padding: 32px;
+    min-height: 300px;
+    padding: 32px 32px 78px;
   }
 
   .auth-pitch {
@@ -48,7 +48,11 @@
 
   .auth-form-area {
     min-height: auto;
-    padding: 42px 32px 56px;
+    padding: 0 32px 56px;
+  }
+
+  .auth-panel {
+    margin-top: -48px;
   }
 
   .page-heading,
@@ -468,7 +472,7 @@
   .content,
   .profile-content {
     width: min(100% - (var(--content-gutter) * 2), 720px);
-    padding: 20px 0 32px;
+    padding: 22px 0 36px;
   }
 
   .weakness-comparison-grid,
@@ -511,7 +515,7 @@
   .report-hero,
   .chat-header,
   .knowledge-editor {
-    padding: 16px;
+    padding: 18px;
   }
 
   .overview-metrics {
@@ -545,9 +549,11 @@
   }
 
   .sticky-form-actions {
-    bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom) + 8px);
+    position: static;
+    bottom: auto;
     align-items: stretch;
     padding: 8px;
+    margin-top: 0;
   }
 
   .sticky-form-actions > span {
@@ -666,16 +672,38 @@
     overflow: visible;
   }
 
+  .mobile-score-disclosure[open] summary {
+    position: fixed;
+    z-index: 121;
+    top: calc(var(--topbar-height) + 10px);
+    right: var(--content-gutter);
+    left: var(--content-gutter);
+    min-height: 54px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    box-shadow: var(--shadow-md);
+  }
+
+  .mobile-score-disclosure[open] summary b::after {
+    content: " · 收起";
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
   .mobile-score-disclosure[open] .mobile-live-score {
     position: fixed;
     z-index: 120;
+    top: calc(var(--topbar-height) + 64px);
     right: var(--content-gutter);
     bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom) + 88px);
     left: var(--content-gutter);
-    max-height: min(360px, calc(100dvh - var(--topbar-height) - var(--mobile-nav-height) - 112px));
+    max-height: none;
     background: var(--surface);
     border: 1px solid var(--line);
-    border-radius: 8px;
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
     box-shadow: var(--shadow-md);
   }
 
@@ -735,8 +763,12 @@
 
   .auth-showcase,
   .auth-form-area {
-    padding-right: max(24px, env(safe-area-inset-right));
-    padding-left: max(24px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+    padding-left: max(16px, env(safe-area-inset-left));
+  }
+
+  .page-heading .privacy-tag {
+    align-self: flex-start;
   }
 
   .citation-head {
@@ -826,8 +858,8 @@
 
 @media (max-width: 480px) {
   .auth-showcase {
-    min-height: 188px;
-    padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 20px max(20px, env(safe-area-inset-left));
+    min-height: 292px;
+    padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 54px max(20px, env(safe-area-inset-left));
   }
 
   .auth-pitch {
@@ -848,7 +880,14 @@
   }
 
   .auth-form-area {
-    padding: 28px max(20px, env(safe-area-inset-right)) 40px max(20px, env(safe-area-inset-left));
+    padding: 0 max(12px, env(safe-area-inset-right)) 32px max(12px, env(safe-area-inset-left));
+  }
+
+  .auth-panel {
+    margin-top: -30px;
+    padding: 25px 20px 28px;
+    border-radius: 16px;
+    box-shadow: 0 16px 40px rgb(16 24 40 / 11%);
   }
 
   .auth-heading {
@@ -857,6 +896,11 @@
 
   .auth-heading h2 {
     font-size: 25px;
+  }
+
+  .profile-grid {
+    gap: 15px;
+    margin-top: 20px;
   }
 
   .section-header > .el-button {

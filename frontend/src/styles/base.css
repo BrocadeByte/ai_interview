@@ -18,8 +18,11 @@
   --surface: #ffffff;
   --surface-subtle: #f8fafc;
   --page: #f3f5f8;
-  --shadow-sm: 0 1px 2px rgb(16 24 40 / 5%);
-  --shadow-md: 0 10px 30px rgb(16 24 40 / 8%);
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 4%), 0 5px 16px rgb(16 24 40 / 3%);
+  --shadow-md: 0 18px 45px rgb(16 24 40 / 11%);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
   --page-gutter: 24px;
   --content-gutter: var(--page-gutter);
   --topbar-height: 72px;
@@ -32,7 +35,7 @@
   --el-color-primary-light-9: #eff6ff;
   --el-color-success: #047857;
   --el-color-warning: #9a5700;
-  --el-border-radius-base: 6px;
+  --el-border-radius-base: 9px;
   --el-border-color: #d0d5dd;
   --el-border-color-light: #e4e7ec;
   --el-text-color-primary: #17202e;
@@ -70,17 +73,13 @@ textarea {
   font: inherit;
 }
 
-:where(button, a, input, textarea, select, summary, [role="button"], [tabindex]):focus-visible {
-  outline: 3px solid var(--primary) !important;
-  outline-offset: 2px !important;
+:where(button, a, summary, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid #475467 !important;
+  outline-offset: 3px !important;
 }
 
-.el-input__wrapper:has(.el-input__inner:focus-visible),
-.el-select__wrapper:has(input:focus-visible),
-.el-input-number:has(input:focus-visible),
-.el-segmented__item:has(input:focus-visible) {
-  outline: 3px solid var(--primary) !important;
-  outline-offset: 2px !important;
+:where(input, textarea, select):focus-visible {
+  outline: none !important;
 }
 
 a {
@@ -92,7 +91,11 @@ a {
 h1,
 h2,
 h3,
-p {
+h4,
+p,
+li,
+dd,
+dt {
   overflow-wrap: anywhere;
 }
 
@@ -101,6 +104,13 @@ h2,
 h3 {
   color: var(--ink);
   letter-spacing: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  text-wrap: balance;
 }
 
 .eyebrow {

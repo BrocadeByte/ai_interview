@@ -204,7 +204,7 @@ onMounted(load)
       <template v-if="report">
         <header class="report-hero">
           <div>
-            <span class="eyebrow">TECH INTERVIEW REVIEW</span>
+            <span class="eyebrow">面试复盘</span>
             <h1>{{ report.is_final ? '面试复盘报告' : '面试报告预览' }}</h1>
             <p v-if="report.is_final">训练编号 #{{ report.session_id }} · 基于全部 {{ report.generated_from_score_count }} 条评分生成</p>
             <p v-else>训练编号 #{{ report.session_id }} · 基于当前 {{ report.generated_from_score_count }} 条评分的临时预览，结束面试后才会保存最终报告</p>

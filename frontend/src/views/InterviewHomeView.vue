@@ -336,7 +336,7 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
     <section class="content dashboard-page">
       <header class="page-heading home-heading">
         <div>
-          <span class="eyebrow">JOB-SPECIFIC INTERVIEW TRAINING</span>
+          <span class="eyebrow">岗位定制训练</span>
           <h1>开始岗位定制训练</h1>
           <p>根据目标技术岗位和难度生成专属训练流程，完成后获得多维复盘报告。</p>
         </div>

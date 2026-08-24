@@ -181,7 +181,7 @@ onMounted(load)
     <section class="content comparison-content">
       <header class="page-heading comparison-heading">
         <div>
-          <span class="eyebrow">PRACTICE PROGRESS</span>
+          <span class="eyebrow">训练进度</span>
           <h1>训练前后对比</h1>
           <p>对照原始表现与再测结果，确认已经改善的部分和下一步训练重点。</p>
         </div>

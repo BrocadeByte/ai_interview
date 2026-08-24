@@ -215,7 +215,7 @@ function stageLabel(stage: string) { return ({ queued: '排队中', parsing: '�
   <main class="app-page">
     <section class="content knowledge-page">
       <header class="section-header">
-        <div><span class="eyebrow">KNOWLEDGE MANAGEMENT</span><h1>面试知识库</h1><p>管理岗位资料、评分标准、追问策略与示范答案，为 AI 面试提供专业依据。</p></div>
+        <div><span class="eyebrow">知识库管理</span><h1>面试知识库</h1><p>管理岗位资料、评分标准、追问策略与示范答案，为 AI 面试提供专业依据。</p></div>
         <el-button :loading="loading" @click="loadDocuments">刷新数据</el-button>
       </header>
       <div class="knowledge-layout" :class="{ 'mobile-editor-open': mobileEditorOpen }">
