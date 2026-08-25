@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ class ChunkedLLM:
 
 
 @pytest.mark.anyio
-async def test_model_json_is_buffered_until_authoritative_text_is_published() -> None:
+async def test_model_question_is_streamed_as_draft_then_authoritative_text_is_published() -> None:
     chunks = [
         '{"question":"Unvalidated ',
         'question?","dimension":"backend"}',
@@ -50,17 +51,74 @@ async def test_model_json_is_buffered_until_authoritative_text_is_published() ->
             [],
             field="question",
         )
-        assert deltas == []
+        assert "".join(deltas) == "Unvalidated question?"
         assert completed == []
 
-        await publish_committed_text("Validated committed question?", chunk_chars=10)
+        await publish_committed_text("Validated committed question?")
     finally:
         reset_stream_text_done_callback(done_token)
         reset_stream_delta_callback(delta_token)
 
     assert response.content == "".join(chunks)
-    assert "".join(deltas) == "Validated committed question?"
+    assert "".join(deltas) == "Unvalidated question?"
     assert completed == ["Validated committed question?"]
+
+
+@pytest.mark.anyio
+async def test_draft_delta_arrives_before_model_stream_finishes() -> None:
+    release_stream = asyncio.Event()
+    delta_received = asyncio.Event()
+    deltas: list[str] = []
+
+    class PausingLLM:
+        async def astream(self, messages):
+            yield SimpleNamespace(content='{"question":"Live')
+            await release_stream.wait()
+            yield SimpleNamespace(content=' question?","score":80}')
+
+    async def capture(delta: str) -> None:
+        deltas.append(delta)
+        delta_received.set()
+
+    token = set_stream_delta_callback(capture)
+    try:
+        task = asyncio.create_task(
+            invoke_json_with_streaming_field(PausingLLM(), [], field="question")
+        )
+        await asyncio.wait_for(delta_received.wait(), timeout=1)
+        assert not task.done()
+        assert "".join(deltas) == "Live"
+
+        release_stream.set()
+        response = await asyncio.wait_for(task, timeout=1)
+    finally:
+        release_stream.set()
+        reset_stream_delta_callback(token)
+
+    assert response.content == '{"question":"Live question?","score":80}'
+    assert "".join(deltas) == "Live question?"
+
+
+@pytest.mark.anyio
+async def test_stream_field_can_be_suppressed_for_known_replacement_path() -> None:
+    deltas: list[str] = []
+
+    async def capture(delta: str) -> None:
+        deltas.append(delta)
+
+    token = set_stream_delta_callback(capture)
+    try:
+        response = await invoke_json_with_streaming_field(
+            ChunkedLLM(['{"question":"discard me"}']),
+            [],
+            field="question",
+            stream_field=False,
+        )
+    finally:
+        reset_stream_delta_callback(token)
+
+    assert response.content == '{"question":"discard me"}'
+    assert deltas == []
 
 
 @pytest.mark.anyio

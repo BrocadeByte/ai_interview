@@ -217,7 +217,7 @@ async function startFirstQuestion() {
     await streamInterviewStart(sessionId, (event) => {
       if (event.event === 'status') {
         streamPhase.value = event.data.phase
-      } else if (event.event === 'delta' && streamingAssistantMessage.value) {
+      } else if (event.event === 'draft_delta' && streamingAssistantMessage.value) {
         streamingAssistantMessage.value.content += event.data.content
         void scrollToBottom()
       } else if (event.event === 'text_done') {
@@ -275,7 +275,7 @@ async function submitAnswer() {
     await streamAnswer(sessionId, submittedAnswer, requestId, (event) => {
       if (event.event === 'status') {
         streamPhase.value = event.data.phase
-      } else if (event.event === 'delta' && streamingAssistantMessage.value) {
+      } else if (event.event === 'draft_delta' && streamingAssistantMessage.value) {
         streamingAssistantMessage.value.content += event.data.content
         void scrollToBottom()
       } else if (event.event === 'text_done') {

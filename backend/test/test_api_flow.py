@@ -460,18 +460,18 @@ async def test_start_stream_emits_first_question_deltas(client: AsyncClient) -> 
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
     assert events[0] == "status"
-    assert "delta" in events
+    assert "draft_delta" in events
     assert events[-1] == "complete"
-    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "delta")
+    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "draft_delta")
     assert events.index("text_done") < events.index("complete")
 
-    delta_text = "".join(
+    draft_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: delta")
+        if frame.startswith("event: draft_delta")
     )
     completed = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    assert delta_text == completed["messages"][-1]["content"]
+    assert draft_text == completed["messages"][-1]["content"]
     assert completed["status"] == "active"
     assert interview_planner.format_knowledge_context.calls == 1
     assert interview_planner.llm.calls == 1
@@ -498,18 +498,18 @@ async def test_answer_stream_emits_deltas_before_complete(client: AsyncClient) -
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
     assert events[0] == "status"
-    assert "delta" in events
+    assert "draft_delta" in events
     assert events[-1] == "complete"
-    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "delta")
+    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "draft_delta")
     assert events.index("text_done") < events.index("complete")
 
-    delta_text = "".join(
+    draft_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: delta")
+        if frame.startswith("event: draft_delta")
     )
     completed = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    assert delta_text == completed["messages"][-1]["content"]
+    assert draft_text == completed["messages"][-1]["content"]
     assert completed["messages"][-1]["role"] == "assistant"
 
 @pytest.mark.anyio
@@ -771,15 +771,15 @@ async def test_answer_compacts_medium_memory_when_context_exceeds_threshold(
 def _stream_frames(response) -> tuple[list[str], list[str], str, dict]:
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
-    delta_text = "".join(
+    draft_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: delta")
+        if frame.startswith("event: draft_delta")
     )
     text_done_frame = next(frame for frame in frames if frame.startswith("event: text_done"))
     text_done_content = __import__("json").loads(text_done_frame.split("data: ", 1)[1])["content"]
     complete = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    return frames, events, delta_text, {"text_done": text_done_content, "complete": complete}
+    return frames, events, draft_text, {"text_done": text_done_content, "complete": complete}
 
 
 @pytest.mark.anyio
@@ -800,12 +800,12 @@ async def test_invalid_json_stream_publishes_only_committed_fallback(client: Asy
     )
 
     assert response.status_code == 200
-    _frames, events, delta_text, payloads = _stream_frames(response)
+    _frames, events, draft_text, payloads = _stream_frames(response)
     complete = payloads["complete"]
     committed_text = complete["messages"][-1]["content"]
-    assert events[-3:] == ["delta", "text_done", "complete"] or events[-2:] == ["text_done", "complete"]
-    assert delta_text == payloads["text_done"] == committed_text
-    assert "not valid json" not in delta_text
+    assert events[-2:] == ["text_done", "complete"]
+    assert draft_text == ""
+    assert payloads["text_done"] == committed_text
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed_text
 
@@ -834,10 +834,11 @@ async def test_duplicate_question_stream_publishes_replacement_saved_to_database
     )
 
     assert response.status_code == 200
-    _frames, _events, delta_text, payloads = _stream_frames(response)
+    _frames, _events, draft_text, payloads = _stream_frames(response)
     committed_text = payloads["complete"]["messages"][-1]["content"]
     assert committed_text != repeated
-    assert delta_text == payloads["text_done"] == committed_text
+    assert draft_text == repeated
+    assert payloads["text_done"] == committed_text
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed_text
 
@@ -884,13 +885,14 @@ async def test_followup_limit_stream_discards_model_followup_and_saves_next_main
     )
 
     assert response.status_code == 200
-    _frames, _events, delta_text, payloads = _stream_frames(response)
+    _frames, _events, draft_text, payloads = _stream_frames(response)
     complete = payloads["complete"]
     committed = complete["messages"][-1]
     assert complete["current_question_index"] == 2
     assert committed["is_followup"] == 0
     assert committed["content"] != "followup 3?"
-    assert delta_text == payloads["text_done"] == committed["content"]
+    assert draft_text == ""
+    assert payloads["text_done"] == committed["content"]
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed["content"]
 

@@ -168,7 +168,7 @@ async def test_duplicate_model_question_is_replaced(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
-async def test_answer_pipeline_does_not_publish_uncommitted_question(monkeypatch) -> None:
+async def test_answer_pipeline_publishes_question_as_draft_only(monkeypatch) -> None:
     monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
         '{"needs_followup":false,"decision_reason":"ok","question":"你如何处理 token 过期？","score":80,'
         + SUB_SCORES + ',"reason":"r","weaknesses":[],"suggestions":[]}'
@@ -191,8 +191,32 @@ async def test_answer_pipeline_does_not_publish_uncommitted_question(monkeypatch
         reset_stream_delta_callback(delta_token)
 
     assert result["current_question"] == "你如何处理 token 过期？"
-    assert deltas == []
+    assert "".join(deltas) == "你如何处理 token 过期？"
     assert completed == []
+
+
+@pytest.mark.anyio
+async def test_answer_pipeline_suppresses_draft_at_followup_limit(monkeypatch) -> None:
+    monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
+        '{"needs_followup":true,"question":"不应展示的第三次追问？","decision_reason":"继续追问",'
+        '"score":70,' + SUB_SCORES + ',"reason":"r","weaknesses":[],"suggestions":[]}'
+    ]))
+    state = _base_state()
+    state["follow_up_count"] = state["max_follow_up_count"]
+    deltas: list[str] = []
+
+    async def capture(delta: str) -> None:
+        deltas.append(delta)
+
+    token = set_stream_delta_callback(capture)
+    try:
+        result = await answer_pipeline.answer_pipeline_node(state)
+    finally:
+        reset_stream_delta_callback(token)
+
+    assert deltas == []
+    assert result["followup_decision"]["needs_followup"] is False
+    assert result["current_question"] != "不应展示的第三次追问？"
 
 @pytest.mark.anyio
 async def test_graph_finish_path_marks_session_finished(monkeypatch) -> None:

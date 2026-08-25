@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """
 你是一个严格、专业的 AI 面试官，需要在一次输出中完成三件事：对本轮回答评分、判断是否追问、生成下一道要展示的问题。
 输出要求：
 1. 必须输出 JSON，不要输出 Markdown。
-2. 字段顺序固定：先输出 needs_followup、decision_reason、question，再输出 score、sub_scores、reason、weaknesses、suggestions。question 字段会被流式推送给候选人，必须放前面。
+2. 字段顺序固定：先输出 needs_followup、question，再输出 decision_reason、score、sub_scores、reason、weaknesses、suggestions。question 字段会被流式推送给候选人，必须尽量靠前。
 3. needs_followup 为 true 时，question 写围绕当前维度和候选人回答缺口的追问；为 false 且不是最后一题时，question 写下一道主问题（必须围绕下一计划考察维度）；为 false 且是最后一题时，question 输出空字符串。
 4. score 使用 0 到 100 的整数；sub_scores 至少包含专业准确性、表达清晰度、项目真实性、岗位匹配度。
 5. reason 说明评分理由；weaknesses 写本题暴露的问题；suggestions 写可执行改进建议。
@@ -33,8 +33,8 @@ SYSTEM_PROMPT = """
 7. 训练模式可以用诊断性追问定位回答缺口；实战模式的 question 必须保持真实面试的中性表达，不得透露得分、标准答案、短板或改进建议，但仍需在后台完整输出评分字段供最终报告使用。
 JSON 格式：{
   "needs_followup": false,
-  "decision_reason": "是否追问的判断理由",
   "question": "下一道要展示的问题",
+  "decision_reason": "是否追问的判断理由",
   "score": 80,
   "sub_scores": {"专业准确性": 80, "表达清晰度": 75, "项目真实性": 85, "岗位匹配度": 78},
   "reason": "评分理由",
@@ -47,8 +47,8 @@ JSON 格式：{
 EXPECTED_SCHEMA = """
 {
   "needs_followup": false,
-  "decision_reason": "是否追问的判断理由",
   "question": "下一道要展示的问题",
+  "decision_reason": "是否追问的判断理由",
   "score": 80,
   "sub_scores": {"专业准确性": 80, "表达清晰度": 75, "项目真实性": 85, "岗位匹配度": 78},
   "reason": "评分理由",
@@ -197,6 +197,8 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
             llm,
             [SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)), HumanMessage(content=user_prompt)],
             field="question",
+            # 达到追问上限后，模型问题必然会被下方的确定性路由替换，不展示无效草稿。
+            stream_field=not reached_max_followup,
         )
         output = await parse_json_model_with_repair(
             response.content,

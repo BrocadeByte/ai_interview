@@ -239,7 +239,7 @@ async def start_interview_stream(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """以 SSE 启动面试，边生成首题边推送文本，完成后再统一提交会话结果。
+    """以 SSE 启动面试，边生成首题边推送草稿，提交后确认权威文本。
 
     流式生成使用独立数据库会话，避免 FastAPI 请求依赖在响应迭代期间被提前关闭；
     客户端断开时会取消后台任务并回滚尚未提交的计划和消息。
@@ -276,7 +276,7 @@ async def start_interview_stream(
         queue: asyncio.Queue[str] = asyncio.Queue()
         async with stream_session_factory() as stream_db:
             async def emit_delta(delta: str) -> None:
-                await queue.put(_sse_event("delta", {"content": delta}))
+                await queue.put(_sse_event("draft_delta", {"content": delta}))
 
             async def emit_text_done(content: str) -> None:
                 await queue.put(_sse_event("text_done", {"content": content}))
@@ -481,8 +481,9 @@ async def answer_interview_stream(
 ) -> StreamingResponse:
     """处理流式回答，在同一租约内完成评分、路由、消息保存并推送下一问题。
 
-    `delta` 只代表可展示文本，`complete` 才携带已提交的权威会话状态。异常或断连
-    会回滚事务并释放租约，使客户端可复用原 request_id 安全重试。
+    `draft_delta` 只代表模型草稿，`text_done` 是提交后的权威文本，`complete` 携带
+    已提交的会话状态。异常或断连会回滚事务并释放租约，使客户端可复用原
+    request_id 安全重试。
     """
     request_id = str(payload.request_id)
     session = await _load_session(db, current_user.id, session_id)
@@ -517,7 +518,7 @@ async def answer_interview_stream(
         queue: asyncio.Queue[str] = asyncio.Queue()
         async with stream_session_factory() as stream_db:
             async def emit_delta(delta: str) -> None:
-                await queue.put(_sse_event("delta", {"content": delta}))
+                await queue.put(_sse_event("draft_delta", {"content": delta}))
 
             async def emit_text_done(content: str) -> None:
                 await queue.put(_sse_event("text_done", {"content": content}))

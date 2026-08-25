@@ -153,7 +153,7 @@ export function finishInterview(id: number) {
 
 export type InterviewStreamEvent =
   | { event: 'status'; data: { phase: string } }
-  | { event: 'delta'; data: { content: string } }
+  | { event: 'draft_delta'; data: { content: string } }
   | { event: 'text_done'; data: { content: string } }
   | { event: 'complete'; data: InterviewSession }
   | { event: 'error'; data: { message: string } }
@@ -186,7 +186,7 @@ async function consumeInterviewStream(
   onEvent: (event: InterviewStreamEvent) => void,
   signal?: AbortSignal
 ) {
-  // 统一消费启动和回答接口的 SSE；complete 事件才是后端已提交的最终会话快照。
+  // draft_delta 是模型草稿；text_done 和 complete 分别确认已提交文本与最终会话快照。
   const response = await authenticatedFetch(url, {
     method: 'POST',
     headers: {
