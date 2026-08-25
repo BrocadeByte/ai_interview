@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import get_current_user
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.models.profile import UserProfile
 from app.models.resume import Resume
 from app.models.user import User
@@ -21,13 +23,20 @@ from app.services.resume_service import (
 
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
+logger = logging.getLogger(__name__)
+
+
+def get_resume_session_factory() -> async_sessionmaker[AsyncSession]:
+    return SessionLocal
 
 
 @router.post("/paste", response_model=ResumeRead, status_code=status.HTTP_201_CREATED)
 async def paste_resume(
     payload: ResumePaste,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_factory=Depends(get_resume_session_factory),
 ) -> ResumeRead:
     raw_text = validate_resume_text(payload.content)
     resume = Resume(
@@ -37,15 +46,19 @@ async def paste_resume(
         raw_text=raw_text,
         status="pending",
     )
-    return await _persist_and_parse_resume(db, resume)
+    stored = await _persist_pending_resume(db, resume)
+    background_tasks.add_task(_parse_resume_in_background, stored.id, current_user.id, session_factory)
+    return stored
 
 
 @router.post("/upload", response_model=ResumeRead, status_code=status.HTTP_201_CREATED)
 async def upload_resume(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str | None = Form(default=None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_factory=Depends(get_resume_session_factory),
 ) -> ResumeRead:
     upload = await parse_resume_upload(file, title)
     resume = Resume(
@@ -57,7 +70,9 @@ async def upload_resume(
         raw_text=upload.raw_text,
         status="pending",
     )
-    return await _persist_and_parse_resume(db, resume)
+    stored = await _persist_pending_resume(db, resume)
+    background_tasks.add_task(_parse_resume_in_background, stored.id, current_user.id, session_factory)
+    return stored
 
 
 @router.get("", response_model=list[ResumeRead])
@@ -145,10 +160,32 @@ async def apply_resume_to_profile(
     return profile
 
 
-async def _persist_and_parse_resume(db: AsyncSession, resume: Resume) -> ResumeRead:
+async def _persist_pending_resume(db: AsyncSession, resume: Resume) -> ResumeRead:
     db.add(resume)
     await db.commit()
     await db.refresh(resume)
+    return _to_resume_read(resume)
+
+
+async def _parse_resume_in_background(
+    resume_id: int,
+    user_id: int,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    try:
+        async with session_factory() as db:
+            resume = await db.scalar(
+                select(Resume).where(Resume.id == resume_id, Resume.user_id == user_id)
+            )
+            if resume is None or resume.status != "pending":
+                return
+            await _parse_and_persist_resume(db, resume)
+    except Exception:
+        logger.exception("resume.background_parse.failed resume_id=%s user_id=%s", resume_id, user_id)
+
+
+async def _parse_and_persist_resume(db: AsyncSession, resume: Resume) -> None:
+    resume_id = resume.id
 
     try:
         output = await parse_resume_text(resume.raw_text)
@@ -173,11 +210,12 @@ async def _persist_and_parse_resume(db: AsyncSession, resume: Resume) -> ResumeR
         resume.profile_patch_json = None
         db.add(resume)
         await db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Resume parsing failed; the existing profile was not changed",
-        ) from exc
-    return _to_resume_read(resume)
+        logger.warning(
+            "resume.parse.failed resume_id=%s error_type=%s",
+            resume_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
 
 
 async def _get_owned_resume(db: AsyncSession, resume_id: int, user_id: int) -> Resume:

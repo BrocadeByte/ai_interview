@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unicodedata
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException, UploadFile, status
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.core.config import settings
 from app.schemas.resume import MAX_RESUME_TEXT_CHARS, ParsedResume, ResumeParseOutput, ResumeProfilePatch
 from app.services.knowledge_file_service import (
     MAX_KNOWLEDGE_FILE_BYTES,
@@ -39,27 +41,51 @@ class ParsedResumeUpload:
     file_type: str
 
 
+class ResumeParseTimeoutError(TimeoutError):
+    """Raised when resume parsing exceeds its end-to-end time budget."""
+
+
 async def parse_resume_text(raw_text: str) -> ResumeParseOutput:
     """把简历原文作为不可信数据交给 LLM，并严格校验结构化输出。"""
     normalized = validate_resume_text(raw_text)
+    parser_llm = _build_resume_parser_llm()
     schema = json.dumps(ResumeParseOutput.model_json_schema(), ensure_ascii=False)
     prompt = (
         f"输出 JSON Schema：\n{schema}\n\n"
         "待解析简历（UNTRUSTED DATA）：\n"
         f"{format_untrusted_data('candidate_resume', normalized)}"
     )
-    response = await llm.ainvoke(
-        [
-            SystemMessage(content=secure_system_prompt(RESUME_PARSE_SYSTEM_PROMPT)),
-            HumanMessage(content=prompt),
-        ]
-    )
-    return await parse_json_model_with_repair(
-        response.content,
-        llm=llm,
-        output_model=ResumeParseOutput,
-        max_retries=1,
-    )
+    try:
+        async with asyncio.timeout(settings.resume_parse_timeout_seconds):
+            response = await parser_llm.ainvoke(
+                [
+                    SystemMessage(content=secure_system_prompt(RESUME_PARSE_SYSTEM_PROMPT)),
+                    HumanMessage(content=prompt),
+                ]
+            )
+            return await parse_json_model_with_repair(
+                response.content,
+                llm=parser_llm,
+                output_model=ResumeParseOutput,
+                max_retries=1,
+            )
+    except TimeoutError as exc:
+        raise ResumeParseTimeoutError("Resume parsing timed out") from exc
+
+
+def _build_resume_parser_llm() -> Any:
+    """Use deterministic, non-reasoning output for extraction when the provider supports it."""
+    bind = getattr(llm, "bind", None)
+    if not callable(bind):
+        return llm
+
+    options: dict[str, Any] = {
+        "temperature": 0,
+        "max_tokens": 4_096,
+    }
+    if "xiaomimimo.com" in settings.openai_api_base.lower():
+        options["extra_body"] = {"thinking": {"type": "disabled"}}
+    return bind(**options)
 
 
 async def parse_resume_upload(file: UploadFile, title: str | None) -> ParsedResumeUpload:
@@ -135,8 +161,12 @@ def serialize_resume_parse_output(output: ResumeParseOutput) -> tuple[str, str]:
 
 
 def safe_parse_error(exc: Exception) -> str:
-    message = str(exc).strip() or "unknown parsing error"
-    return f"{type(exc).__name__}: {message}"[:1_000]
+    if isinstance(exc, ResumeParseTimeoutError):
+        return "AI 简历解析超时，请稍后重试"
+    message = str(exc).strip().lower()
+    if type(exc).__name__ in {"APIConnectionError", "ConnectError"} or "connection error" in message:
+        return "AI 简历解析服务暂时不可用，请稍后重试"
+    return "AI 未能识别简历内容，请检查文件内容后重试"
 
 
 def load_json_object(value: str | None) -> dict[str, Any] | None:

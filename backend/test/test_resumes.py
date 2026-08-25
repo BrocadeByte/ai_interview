@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -59,6 +60,7 @@ async def test_context(tmp_path):
 
     resume_app.dependency_overrides[get_db] = override_get_db
     resume_app.dependency_overrides[get_current_user] = override_current_user
+    resume_app.dependency_overrides[resumes_api.get_resume_session_factory] = lambda: session_factory
     transport = ASGITransport(app=resume_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client, session_factory, state
@@ -112,9 +114,11 @@ async def test_paste_resume_creates_draft_without_changing_profile(test_context,
 
     assert response.status_code == 201
     data = response.json()
-    assert data["status"] == "parsed"
-    assert data["parsed"]["skills"] == ["Python", "FastAPI"]
-    assert data["profile_patch"]["target_position"] == "Python 后端工程师"
+    assert data["status"] == "pending"
+    parsed = (await client.get(f"/api/resumes/{data['id']}")).json()
+    assert parsed["status"] == "parsed"
+    assert parsed["parsed"]["skills"] == ["Python", "FastAPI"]
+    assert parsed["profile_patch"]["target_position"] == "Python 后端工程师"
     async with session_factory() as db:
         assert await db.scalar(select(UserProfile).where(UserProfile.user_id == 1)) is None
 
@@ -143,8 +147,11 @@ async def test_upload_txt_and_markdown_resume(test_context, monkeypatch, file_na
     )
 
     assert response.status_code == 201
-    assert response.json()["file_type"] == Path(file_name).suffix.lstrip(".")
-    assert response.json()["source_type"] == "upload"
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["file_type"] == Path(file_name).suffix.lstrip(".")
+    assert data["source_type"] == "upload"
+    assert (await client.get(f"/api/resumes/{data['id']}")).json()["status"] == "parsed"
 
 
 @pytest.mark.anyio
@@ -164,6 +171,49 @@ async def test_pdf_upload_uses_shared_document_parser(monkeypatch) -> None:
     assert parsed.file_type == "pdf"
     assert parsed.raw_text == "PDF 中提取的 Python 项目经历"
     assert calls == [(b"pdf-bytes", "candidate.pdf")]
+
+
+@pytest.mark.anyio
+async def test_resume_parse_has_an_end_to_end_timeout(monkeypatch) -> None:
+    class SlowLLM:
+        async def ainvoke(self, _messages):
+            await asyncio.sleep(0.1)
+            return SimpleNamespace(content="{}")
+
+    monkeypatch.setattr(resume_service, "llm", SlowLLM())
+    monkeypatch.setattr(resume_service.settings, "resume_parse_timeout_seconds", 0.01)
+
+    with pytest.raises(resume_service.ResumeParseTimeoutError, match="timed out"):
+        await resume_service.parse_resume_text("Python FastAPI 项目经验")
+
+
+@pytest.mark.anyio
+async def test_resume_parser_disables_mimo_thinking_for_structured_output(monkeypatch) -> None:
+    payload = json.dumps(valid_parse_output().model_dump(mode="json"), ensure_ascii=False)
+
+    class BindableLLM:
+        def __init__(self) -> None:
+            self.options = None
+
+        def bind(self, **options):
+            self.options = options
+            return self
+
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content=payload)
+
+    fake_llm = BindableLLM()
+    monkeypatch.setattr(resume_service, "llm", fake_llm)
+    monkeypatch.setattr(resume_service.settings, "openai_api_base", "https://api.xiaomimimo.com/v1")
+
+    result = await resume_service.parse_resume_text("Python FastAPI 项目经验")
+
+    assert result.parsed.skills == ["Python", "FastAPI"]
+    assert fake_llm.options == {
+        "temperature": 0,
+        "max_tokens": 4_096,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
 
 
 @pytest.mark.anyio
@@ -209,7 +259,8 @@ async def test_invalid_llm_json_marks_resume_failed_and_preserves_profile(test_c
         json={"title": "异常简历", "content": "Python 项目经验"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending"
     async with session_factory() as db:
         failed = await db.scalar(
             select(Resume).where(Resume.title == "异常简历").order_by(Resume.id.desc())
@@ -217,6 +268,7 @@ async def test_invalid_llm_json_marks_resume_failed_and_preserves_profile(test_c
         profile = await db.scalar(select(UserProfile).where(UserProfile.user_id == 1))
         assert failed is not None
         assert failed.status == "failed"
+        assert failed.error_message == "AI 未能识别简历内容，请检查文件内容后重试"
         assert failed.parsed_json is None
         assert profile is not None and profile.skills == "Existing skill"
 

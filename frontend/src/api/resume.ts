@@ -31,14 +31,14 @@ export interface PasteResumeInput {
 }
 
 export function pasteResume(data: PasteResumeInput) {
-  return apiClient.post<ResumeVersion>('/resumes/paste', data)
+  return apiClient.post<ResumeVersion>('/resumes/paste', data, { timeout: 15_000 })
 }
 
 export function uploadResume(file: File, title = file.name) {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('title', title)
-  return apiClient.post<ResumeVersion>('/resumes/upload', formData)
+  return apiClient.post<ResumeVersion>('/resumes/upload', formData, { timeout: 30_000 })
 }
 
 export function fetchResumes() {
@@ -46,7 +46,17 @@ export function fetchResumes() {
 }
 
 export function fetchResume(id: number) {
-  return apiClient.get<ResumeVersion>(`/resumes/${id}`)
+  return apiClient.get<ResumeVersion>(`/resumes/${id}`, { timeout: 10_000 })
+}
+
+export async function waitForResumeParsing(id: number, timeoutMs = 70_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await delay(800)
+    const { data } = await fetchResume(id)
+    if (data.status !== 'pending') return data
+  }
+  throw new Error('简历已上传，但 AI 解析等待超时，请稍后重试')
 }
 
 export function activateResume(id: number) {
@@ -55,4 +65,8 @@ export function activateResume(id: number) {
 
 export function applyResumeToProfile(id: number) {
   return apiClient.post<Profile>(`/resumes/${id}/apply-profile`)
+}
+
+function delay(milliseconds: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds))
 }

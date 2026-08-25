@@ -19,11 +19,12 @@ import { getApiErrorMessage } from '../api/client'
 import { createInterview, fetchInterviews, rememberInterview, type InterviewCreateInput, type InterviewSession, type InterviewType, warmupInterview } from '../api/interview'
 import { parseJobDescription } from '../api/jobDescription'
 import { autoGenerateProfile, fetchProfile, updateProfile, type AutoProfileDraft, type Profile } from '../api/profile'
-import { pasteResume, uploadResume } from '../api/resume'
+import { pasteResume, uploadResume, waitForResumeParsing } from '../api/resume'
 
 const router = useRouter()
 const loading = ref(false)
 const preparingProfile = ref(false)
+const profilePreparationStage = ref<'submitting_resume' | 'parsing_resume' | 'parsing_job' | 'generating_profile' | null>(null)
 const confirmingProfile = ref(false)
 const sessions = ref<InterviewSession[]>([])
 const form = reactive<InterviewCreateInput>({
@@ -88,6 +89,12 @@ const modeHint = computed(() => form.mode === 'training'
   ? '每次作答后显示实时评分和改进建议，适合边练边学。'
   : '答题过程中不展示评分或即时提示，结束后统一查看复盘报告。')
 const startButtonLabel = computed(() => form.mode === 'mock' ? '开始实战模拟' : '开始训练')
+const preparingProfileLabel = computed(() => ({
+  submitting_resume: '正在上传简历…',
+  parsing_resume: 'AI 正在解析简历…',
+  parsing_job: 'AI 正在解析 JD…',
+  generating_profile: '正在生成自动画像…'
+}[profilePreparationStage.value || 'generating_profile']))
 
 async function load() {
   const [{ data: profile }, { data: history }] = await Promise.all([fetchProfile(), fetchInterviews()])
@@ -201,17 +208,25 @@ async function generateProfileDraft() {
     let detectedPosition = form.target_position.trim()
 
     if (!nextResumeId && selectedResumeFile.value) {
-      const { data } = await uploadResume(selectedResumeFile.value)
+      profilePreparationStage.value = 'submitting_resume'
+      const { data: uploaded } = await uploadResume(selectedResumeFile.value)
+      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
+      profilePreparationStage.value = 'parsing_resume'
+      const data = uploaded.status === 'pending' ? await waitForResumeParsing(uploaded.id) : uploaded
       assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
       nextResumeId = data.id
       resumeId.value = data.id
       if (!detectedPosition && data.profile_patch?.target_position) detectedPosition = data.profile_patch.target_position
     } else if (!nextResumeId && resumeText.value.trim()) {
-      const { data } = await pasteResume({
+      profilePreparationStage.value = 'submitting_resume'
+      const { data: submitted } = await pasteResume({
         title: `粘贴简历 ${new Date().toLocaleDateString('zh-CN')}`,
         content: resumeText.value.trim()
       })
+      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
+      profilePreparationStage.value = 'parsing_resume'
+      const data = submitted.status === 'pending' ? await waitForResumeParsing(submitted.id) : submitted
       assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
       nextResumeId = data.id
@@ -220,6 +235,7 @@ async function generateProfileDraft() {
     }
 
     if (!nextJobDescriptionId && jobDescriptionText.value.trim()) {
+      profilePreparationStage.value = 'parsing_job'
       const { data } = await parseJobDescription({
         raw_text: jobDescriptionText.value.trim(),
         title: detectedPosition || '目标岗位 JD'
@@ -231,6 +247,7 @@ async function generateProfileDraft() {
       if (!detectedPosition && parsedPosition) detectedPosition = parsedPosition
     }
 
+    profilePreparationStage.value = 'generating_profile'
     const { data: draft } = await autoGenerateProfile({
       ...(nextResumeId ? { resume_id: nextResumeId } : {}),
       ...(nextJobDescriptionId ? { job_description_id: nextJobDescriptionId } : {}),
@@ -245,10 +262,14 @@ async function generateProfileDraft() {
     if (error instanceof StaleProfileGenerationError) {
       ElMessage.info('材料已变化，旧画像结果已作废，请基于最新材料重新生成')
     } else {
-      ElMessage.error(error instanceof Error ? error.message : getApiErrorMessage(error, '画像生成失败，请检查输入后重试'))
+      const fallback = error instanceof Error ? error.message : '画像生成失败，请检查输入后重试'
+      ElMessage.error(getApiErrorMessage(error, fallback))
     }
   } finally {
-    if (generationSequence === profileGenerationSequence) preparingProfile.value = false
+    if (generationSequence === profileGenerationSequence) {
+      preparingProfile.value = false
+      profilePreparationStage.value = null
+    }
   }
 }
 
@@ -431,7 +452,7 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
                 :disabled="!profileConfirmationRequired || confirmingProfile"
                 @click="generateProfileDraft"
               >
-                {{ profileDraft ? '重新生成自动画像' : '生成自动画像' }}
+                {{ preparingProfile ? preparingProfileLabel : profileDraft ? '重新生成自动画像' : '生成自动画像' }}
               </el-button>
 
               <div v-if="profileDraft" class="profile-preview" aria-live="polite">
