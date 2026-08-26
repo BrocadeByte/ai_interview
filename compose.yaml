@@ -40,7 +40,15 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env.production}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.deepseek.com}
       OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-chat}
-      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      RESUME_PARSE_MODEL: ${RESUME_PARSE_MODEL:-}
+      RESUME_PARSE_TIMEOUT_SECONDS: ${RESUME_PARSE_TIMEOUT_SECONDS:-35}
+      RABBITMQ_URL: ${RABBITMQ_URL:?Set RABBITMQ_URL in .env.production}
+      RABBITMQ_RESUME_QUEUE: ${RABBITMQ_RESUME_QUEUE:-resume.parsing}
+      RABBITMQ_RESUME_EXCHANGE: ${RABBITMQ_RESUME_EXCHANGE:-resume.parsing.exchange}
+      RABBITMQ_RESUME_DLX: ${RABBITMQ_RESUME_DLX:-resume.parsing.dlx}
+      RABBITMQ_PREFETCH_COUNT: ${RABBITMQ_PREFETCH_COUNT:-2}
+      RABBITMQ_CONNECT_TIMEOUT_SECONDS: ${RABBITMQ_CONNECT_TIMEOUT_SECONDS:-10}
+      QDRANT_URL: ${QDRANT_URL:?Set QDRANT_URL to the VM endpoint in .env.production}
       QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-knowledge_documents}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-dashscope}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
@@ -63,6 +71,32 @@ services:
       ALIYUN_OSS_PREFIX: ${ALIYUN_OSS_PREFIX:-knowledge/}
       OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      TZ: Asia/Shanghai
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [app_network]
+
+  resume-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.resume_worker"]
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: mysql+aiomysql://${MYSQL_USER:-ai_interview}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-ai_interview}?charset=utf8mb4
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env.production}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.deepseek.com}
+      OPENAI_MODEL: ${OPENAI_MODEL:-deepseek-chat}
+      RESUME_PARSE_MODEL: ${RESUME_PARSE_MODEL:-}
+      RESUME_PARSE_TIMEOUT_SECONDS: ${RESUME_PARSE_TIMEOUT_SECONDS:-35}
+      RABBITMQ_URL: ${RABBITMQ_URL:?Set RABBITMQ_URL in .env.production}
+      RABBITMQ_RESUME_QUEUE: ${RABBITMQ_RESUME_QUEUE:-resume.parsing}
+      RABBITMQ_RESUME_EXCHANGE: ${RABBITMQ_RESUME_EXCHANGE:-resume.parsing.exchange}
+      RABBITMQ_RESUME_DLX: ${RABBITMQ_RESUME_DLX:-resume.parsing.dlx}
+      RABBITMQ_PREFETCH_COUNT: ${RABBITMQ_PREFETCH_COUNT:-2}
+      RABBITMQ_CONNECT_TIMEOUT_SECONDS: ${RABBITMQ_CONNECT_TIMEOUT_SECONDS:-10}
       TZ: Asia/Shanghai
     depends_on:
       mysql:

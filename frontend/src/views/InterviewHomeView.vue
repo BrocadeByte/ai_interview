@@ -19,7 +19,7 @@ import { getApiErrorMessage } from '../api/client'
 import { createInterview, fetchInterviews, rememberInterview, type InterviewCreateInput, type InterviewSession, type InterviewType, warmupInterview } from '../api/interview'
 import { parseJobDescription } from '../api/jobDescription'
 import { autoGenerateProfile, fetchProfile, updateProfile, type AutoProfileDraft, type Profile } from '../api/profile'
-import { pasteResume, uploadResume, waitForResumeParsing } from '../api/resume'
+import { ResumeParsingFailedError, ResumeParsingTimeoutError, pasteResume, uploadResume, waitForResumeParsing, type ResumeVersion } from '../api/resume'
 
 const router = useRouter()
 const loading = ref(false)
@@ -42,6 +42,14 @@ const resumeId = ref<number | null>(null)
 const jobDescriptionId = ref<number | null>(null)
 const profileDraft = ref<AutoProfileDraft | null>(null)
 const profileConfirmed = ref(false)
+type ResumeParsingNoticeStatus = 'idle' | 'waiting' | 'parsed' | 'failed' | 'timeout'
+const resumeParsingNotice = reactive({
+  status: 'idle' as ResumeParsingNoticeStatus,
+  resumeId: null as number | null,
+  startedAt: 0,
+  elapsedSeconds: 0,
+  message: ''
+})
 const modeOptions = [
   { label: '训练模式', value: 'training' },
   { label: '实战模式', value: 'mock' }
@@ -57,6 +65,9 @@ let warmupTimer: ReturnType<typeof setTimeout> | null = null
 let lastWarmedPosition = ''
 let profileGenerationSequence = 0
 let profileMaterialRevision = 0
+let resumeParsingTimer: ReturnType<typeof setInterval> | null = null
+
+const RESUME_PARSING_WAIT_SECONDS = 40
 
 class StaleProfileGenerationError extends Error {}
 
@@ -95,6 +106,84 @@ const preparingProfileLabel = computed(() => ({
   parsing_job: 'AI 正在解析 JD…',
   generating_profile: '正在生成自动画像…'
 }[profilePreparationStage.value || 'generating_profile']))
+const resumeParsingProgress = computed(() => Math.min(
+  100,
+  Math.round((resumeParsingNotice.elapsedSeconds / RESUME_PARSING_WAIT_SECONDS) * 100)
+))
+const resumeParsingNoticeTitle = computed(() => ({
+  idle: '',
+  waiting: 'AI 正在解析简历',
+  parsed: 'AI 简历解析完成',
+  failed: 'AI 简历解析失败',
+  timeout: 'AI 简历解析等待超时'
+}[resumeParsingNotice.status]))
+
+function stopResumeParsingTimer() {
+  if (resumeParsingTimer) window.clearInterval(resumeParsingTimer)
+  resumeParsingTimer = null
+}
+
+function resetResumeParsingNotice() {
+  stopResumeParsingTimer()
+  resumeParsingNotice.status = 'idle'
+  resumeParsingNotice.resumeId = null
+  resumeParsingNotice.startedAt = 0
+  resumeParsingNotice.elapsedSeconds = 0
+  resumeParsingNotice.message = ''
+}
+
+function updateResumeParsingElapsed() {
+  if (!resumeParsingNotice.startedAt) return
+  resumeParsingNotice.elapsedSeconds = Math.min(
+    RESUME_PARSING_WAIT_SECONDS,
+    Math.floor((Date.now() - resumeParsingNotice.startedAt) / 1000)
+  )
+}
+
+function beginResumeParsingNotice(id: number) {
+  resetResumeParsingNotice()
+  resumeParsingNotice.status = 'waiting'
+  resumeParsingNotice.resumeId = id
+  resumeParsingNotice.startedAt = Date.now()
+  resumeParsingNotice.message = '解析任务已提交，最多等待约 40 秒；完成或失败后会在这里显示结果。'
+  resumeParsingTimer = window.setInterval(updateResumeParsingElapsed, 500)
+}
+
+function finishResumeParsingNotice(status: Exclude<ResumeParsingNoticeStatus, 'idle' | 'waiting'>, message: string) {
+  updateResumeParsingElapsed()
+  stopResumeParsingTimer()
+  resumeParsingNotice.status = status
+  resumeParsingNotice.message = message
+}
+
+async function awaitSubmittedResume(
+  submitted: ResumeVersion,
+  generationSequence: number,
+  materialRevision: number,
+  materialKey: string
+) {
+  beginResumeParsingNotice(submitted.id)
+  try {
+    if (submitted.status === 'failed') {
+      throw new ResumeParsingFailedError(submitted.error_message || 'AI 简历解析失败，请检查简历内容后重试')
+    }
+    const data = submitted.status === 'pending' ? await waitForResumeParsing(submitted.id) : submitted
+    assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
+    finishResumeParsingNotice('parsed', '简历已解析完成，正在继续生成自动画像草稿。')
+    return data
+  } catch (error) {
+    if (error instanceof StaleProfileGenerationError) {
+      resetResumeParsingNotice()
+    } else if (error instanceof ResumeParsingTimeoutError) {
+      finishResumeParsingNotice('timeout', error.message)
+    } else if (error instanceof ResumeParsingFailedError) {
+      finishResumeParsingNotice('failed', error.message)
+    } else {
+      finishResumeParsingNotice('failed', getApiErrorMessage(error, '无法获取 AI 简历解析结果，请稍后重试'))
+    }
+    throw error
+  }
+}
 
 async function load() {
   const [{ data: profile }, { data: history }] = await Promise.all([fetchProfile(), fetchInterviews()])
@@ -117,6 +206,7 @@ watch(() => form.target_position, scheduleWarmup)
 onMounted(load)
 onBeforeUnmount(() => {
   if (warmupTimer) clearTimeout(warmupTimer)
+  stopResumeParsingTimer()
   profileGenerationSequence += 1
 })
 
@@ -145,7 +235,10 @@ function assertCurrentProfileGeneration(sequence: number, revision: number, mate
 
 function invalidateGeneratedProfile(source: 'resume' | 'job-description' | 'target-position') {
   profileMaterialRevision += 1
-  if (source === 'resume') resumeId.value = null
+  if (source === 'resume') {
+    resumeId.value = null
+    resetResumeParsingNotice()
+  }
   else if (source === 'job-description') jobDescriptionId.value = null
   profileDraft.value = null
   profileConfirmed.value = false
@@ -192,6 +285,23 @@ function removeResumeFile() {
   invalidateGeneratedProfile('resume')
 }
 
+function getProfilePreparationErrorMessage(error: unknown) {
+  if (error instanceof ResumeParsingTimeoutError) return error.message
+  if (error instanceof ResumeParsingFailedError) return error.message
+  if (profilePreparationStage.value === 'submitting_resume') {
+    const detail = getApiErrorMessage(error, '')
+    if (detail.includes('解析任务提交失败')) return detail
+    if (selectedResumeFile.value) {
+      return detail ? `简历文件上传失败：${detail}` : '简历文件上传失败，请检查文件后重试'
+    }
+    return detail ? `简历任务提交失败：${detail}` : '简历任务提交失败，请稍后重试'
+  }
+  if (profilePreparationStage.value === 'parsing_resume') {
+    return getApiErrorMessage(error, error instanceof Error ? error.message : 'AI 简历解析失败，请稍后重试')
+  }
+  return getApiErrorMessage(error, error instanceof Error ? error.message : '画像生成失败，请检查输入后重试')
+}
+
 async function generateProfileDraft() {
   if (!profileConfirmationRequired.value) {
     ElMessage.info('请先粘贴或上传简历，或粘贴目标岗位 JD')
@@ -200,6 +310,7 @@ async function generateProfileDraft() {
   const generationSequence = ++profileGenerationSequence
   const materialRevision = profileMaterialRevision
   const materialKey = profileMaterialKey()
+  resetResumeParsingNotice()
   preparingProfile.value = true
   profileConfirmed.value = false
   try {
@@ -212,9 +323,7 @@ async function generateProfileDraft() {
       const { data: uploaded } = await uploadResume(selectedResumeFile.value)
       assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       profilePreparationStage.value = 'parsing_resume'
-      const data = uploaded.status === 'pending' ? await waitForResumeParsing(uploaded.id) : uploaded
-      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
-      if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
+      const data = await awaitSubmittedResume(uploaded, generationSequence, materialRevision, materialKey)
       nextResumeId = data.id
       resumeId.value = data.id
       if (!detectedPosition && data.profile_patch?.target_position) detectedPosition = data.profile_patch.target_position
@@ -226,9 +335,7 @@ async function generateProfileDraft() {
       })
       assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
       profilePreparationStage.value = 'parsing_resume'
-      const data = submitted.status === 'pending' ? await waitForResumeParsing(submitted.id) : submitted
-      assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
-      if (data.status === 'failed') throw new Error(data.error_message || '简历解析失败')
+      const data = await awaitSubmittedResume(submitted, generationSequence, materialRevision, materialKey)
       nextResumeId = data.id
       resumeId.value = data.id
       if (!detectedPosition && data.profile_patch?.target_position) detectedPosition = data.profile_patch.target_position
@@ -255,6 +362,9 @@ async function generateProfileDraft() {
     })
     assertCurrentProfileGeneration(generationSequence, materialRevision, materialKey)
     profileDraft.value = { ...draft, warnings: draft.warnings || [] }
+    if (resumeParsingNotice.status === 'parsed') {
+      resumeParsingNotice.message = '简历解析和自动画像草稿生成均已完成，请确认画像后再开始训练。'
+    }
     const draftPosition = draft.profile_patch.target_position?.trim() || detectedPosition
     if (draftPosition) form.target_position = draftPosition
     ElMessage.success('自动画像草稿已生成')
@@ -262,8 +372,7 @@ async function generateProfileDraft() {
     if (error instanceof StaleProfileGenerationError) {
       ElMessage.info('材料已变化，旧画像结果已作废，请基于最新材料重新生成')
     } else {
-      const fallback = error instanceof Error ? error.message : '画像生成失败，请检查输入后重试'
-      ElMessage.error(getApiErrorMessage(error, fallback))
+      ElMessage.error(getProfilePreparationErrorMessage(error))
     }
   } finally {
     if (generationSequence === profileGenerationSequence) {
@@ -454,6 +563,31 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
               >
                 {{ preparingProfile ? preparingProfileLabel : profileDraft ? '重新生成自动画像' : '生成自动画像' }}
               </el-button>
+
+              <div
+                v-if="resumeParsingNotice.status !== 'idle'"
+                class="resume-parsing-status"
+                :class="`resume-parsing-status--${resumeParsingNotice.status}`"
+                aria-live="polite"
+              >
+                <div class="resume-parsing-status-heading">
+                  <strong>{{ resumeParsingNoticeTitle }}</strong>
+                  <span v-if="resumeParsingNotice.status === 'waiting'">
+                    已等待 {{ resumeParsingNotice.elapsedSeconds }} 秒 / 最多约 40 秒
+                  </span>
+                  <span v-else-if="resumeParsingNotice.elapsedSeconds">
+                    用时约 {{ resumeParsingNotice.elapsedSeconds }} 秒
+                  </span>
+                </div>
+                <el-progress
+                  v-if="resumeParsingNotice.status === 'waiting'"
+                  :percentage="resumeParsingProgress"
+                  :stroke-width="7"
+                  :show-text="false"
+                />
+                <p>{{ resumeParsingNotice.message }}</p>
+                <small v-if="resumeParsingNotice.resumeId">解析任务 #{{ resumeParsingNotice.resumeId }}</small>
+              </div>
 
               <div v-if="profileDraft" class="profile-preview" aria-live="polite">
                 <div class="profile-preview-heading">

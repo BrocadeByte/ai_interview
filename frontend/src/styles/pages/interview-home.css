@@ -246,6 +246,62 @@
   margin-top: 14px;
 }
 
+.resume-parsing-status {
+  margin-top: 12px;
+  padding: 13px 14px;
+  color: var(--text);
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.resume-parsing-status--waiting {
+  background: var(--primary-soft);
+  border-color: #c7d7fe;
+}
+
+.resume-parsing-status--parsed {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.resume-parsing-status--failed,
+.resume-parsing-status--timeout {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.resume-parsing-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.resume-parsing-status-heading strong {
+  font-size: 13px;
+}
+
+.resume-parsing-status-heading span,
+.resume-parsing-status small {
+  color: var(--muted);
+}
+
+.resume-parsing-status .el-progress {
+  margin-top: 10px;
+}
+
+.resume-parsing-status p {
+  margin: 9px 0 2px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.resume-parsing-status small {
+  font-size: 11px;
+}
+
 .profile-preview {
   margin-top: 14px;
   padding: 16px;

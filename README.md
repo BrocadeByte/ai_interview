@@ -28,7 +28,10 @@ DATABASE_URL=mysql+aiomysql://root:123456@127.0.0.1:3306/ai_interview?charset=ut
 OPENAI_API_KEY=你的模型 API Key
 OPENAI_API_BASE=https://api.deepseek.com
 OPENAI_MODEL=deepseek-chat
-QDRANT_URL=http://127.0.0.1:6333
+RESUME_PARSE_MODEL=
+RESUME_PARSE_TIMEOUT_SECONDS=35
+RABBITMQ_URL=amqp://user:password@虚拟机IP:5672/
+QDRANT_URL=http://虚拟机IP:6333
 QDRANT_COLLECTION_NAME=knowledge_documents
 EMBEDDING_PROVIDER=dashscope
 EMBEDDING_MODEL=text-embedding-v4
@@ -74,6 +77,23 @@ python -m venv .venv
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
+
+简历解析由独立 Worker 消费 RabbitMQ 任务；在另一个终端启动：
+
+```bash
+cd backend
+python -m app.workers.resume_worker
+```
+
+默认拓扑为 `resume.parsing.exchange` → `resume.parsing`，延迟重试队列为
+`resume.parsing.retry`，死信交换机/队列为 `resume.parsing.dlx` / `resume.parsing.dead`。
+消息只包含 `resume_id`、`user_id` 和 `attempt`。使用 Compose 部署时，
+`resume-worker` 服务会执行同一启动命令；RabbitMQ 和 Qdrant 都沿用虚拟机上的
+外部服务，分别由 `RABBITMQ_URL` 和 `QDRANT_URL` 指定。容器内不能把虚拟机服务
+写成 `127.0.0.1`；应使用容器网络可达的虚拟机 IP/主机名，并确保 5672/6333 端口
+及 RabbitMQ 用户权限已对应用容器开放。Resume Worker 不访问 Qdrant。AI 连接失败、
+限流和临时服务错误会自动重试一次；完整 35 秒解析超时会直接失败，避免超过前端
+约 40 秒的等待预算。
 
 后端接口地址为 `http://127.0.0.1:8000`。
 

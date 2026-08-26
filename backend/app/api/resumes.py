@@ -1,11 +1,11 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.core.database import SessionLocal, get_db
+from app.core.database import get_db
 from app.models.profile import UserProfile
 from app.models.resume import Resume
 from app.models.user import User
@@ -14,29 +14,22 @@ from app.schemas.resume import ParsedResume, ResumePaste, ResumeProfilePatch, Re
 from app.services.analytics_service import record_analytics_event_safely
 from app.services.resume_service import (
     load_json_object,
-    parse_resume_text,
     parse_resume_upload,
-    safe_parse_error,
-    serialize_resume_parse_output,
     validate_resume_text,
 )
+from app.services.resume_queue import publish_resume_parse_task
 
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
 logger = logging.getLogger(__name__)
-
-
-def get_resume_session_factory() -> async_sessionmaker[AsyncSession]:
-    return SessionLocal
+RESUME_QUEUE_PUBLISH_ERROR = "简历已保存，但解析任务提交失败，请稍后重新上传"
 
 
 @router.post("/paste", response_model=ResumeRead, status_code=status.HTTP_201_CREATED)
 async def paste_resume(
     payload: ResumePaste,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    session_factory=Depends(get_resume_session_factory),
 ) -> ResumeRead:
     raw_text = validate_resume_text(payload.content)
     resume = Resume(
@@ -47,18 +40,17 @@ async def paste_resume(
         status="pending",
     )
     stored = await _persist_pending_resume(db, resume)
-    background_tasks.add_task(_parse_resume_in_background, stored.id, current_user.id, session_factory)
-    return stored
+    await _publish_resume_task_or_fail(db, stored)
+    await _record_resume_submission(db, stored)
+    return _to_resume_read(stored)
 
 
 @router.post("/upload", response_model=ResumeRead, status_code=status.HTTP_201_CREATED)
 async def upload_resume(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str | None = Form(default=None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    session_factory=Depends(get_resume_session_factory),
 ) -> ResumeRead:
     upload = await parse_resume_upload(file, title)
     resume = Resume(
@@ -71,8 +63,9 @@ async def upload_resume(
         status="pending",
     )
     stored = await _persist_pending_resume(db, resume)
-    background_tasks.add_task(_parse_resume_in_background, stored.id, current_user.id, session_factory)
-    return stored
+    await _publish_resume_task_or_fail(db, stored)
+    await _record_resume_submission(db, stored)
+    return _to_resume_read(stored)
 
 
 @router.get("", response_model=list[ResumeRead])
@@ -160,62 +153,45 @@ async def apply_resume_to_profile(
     return profile
 
 
-async def _persist_pending_resume(db: AsyncSession, resume: Resume) -> ResumeRead:
+async def _persist_pending_resume(db: AsyncSession, resume: Resume) -> Resume:
     db.add(resume)
     await db.commit()
     await db.refresh(resume)
-    return _to_resume_read(resume)
+    return resume
 
 
-async def _parse_resume_in_background(
-    resume_id: int,
-    user_id: int,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+async def _publish_resume_task_or_fail(db: AsyncSession, resume: Resume) -> None:
     try:
-        async with session_factory() as db:
-            resume = await db.scalar(
-                select(Resume).where(Resume.id == resume_id, Resume.user_id == user_id)
-            )
-            if resume is None or resume.status != "pending":
-                return
-            await _parse_and_persist_resume(db, resume)
-    except Exception:
-        logger.exception("resume.background_parse.failed resume_id=%s user_id=%s", resume_id, user_id)
-
-
-async def _parse_and_persist_resume(db: AsyncSession, resume: Resume) -> None:
-    resume_id = resume.id
-
-    try:
-        output = await parse_resume_text(resume.raw_text)
-        resume.parsed_json, resume.profile_patch_json = serialize_resume_parse_output(output)
-        resume.status = "parsed"
-        resume.error_message = None
-        await record_analytics_event_safely(
-            db,
-            event_name="resume_uploaded" if resume.source_type == "upload" else "resume_pasted",
-            user_id=resume.user_id,
-            resume_id=resume.id,
-            deduplication_key=f"resume_{resume.source_type}:{resume.id}",
-            properties={"file_type": resume.file_type} if resume.file_type else None,
-        )
-        await db.commit()
-        await db.refresh(resume)
+        await publish_resume_parse_task(resume.id, resume.user_id, attempt=1)
     except Exception as exc:
-        await db.rollback()
         resume.status = "failed"
-        resume.error_message = safe_parse_error(exc)
         resume.parsed_json = None
         resume.profile_patch_json = None
-        db.add(resume)
+        resume.error_message = RESUME_QUEUE_PUBLISH_ERROR
         await db.commit()
-        logger.warning(
-            "resume.parse.failed resume_id=%s error_type=%s",
-            resume_id,
+        logger.error(
+            "resume.queue.publish.failed resume_id=%s user_id=%s attempt=1 error_type=%s",
+            resume.id,
+            resume.user_id,
             type(exc).__name__,
-            exc_info=True,
         )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=RESUME_QUEUE_PUBLISH_ERROR,
+        ) from exc
+
+
+async def _record_resume_submission(db: AsyncSession, resume: Resume) -> None:
+    """Preserve resume funnel analytics without adding non-Resume writes to the worker."""
+    await record_analytics_event_safely(
+        db,
+        event_name="resume_uploaded" if resume.source_type == "upload" else "resume_pasted",
+        user_id=resume.user_id,
+        resume_id=resume.id,
+        deduplication_key=f"resume_{resume.source_type}:{resume.id}",
+        properties={"file_type": resume.file_type} if resume.file_type else None,
+    )
+    await db.commit()
 
 
 async def _get_owned_resume(db: AsyncSession, resume_id: int, user_id: int) -> Resume:
