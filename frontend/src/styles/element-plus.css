@@ -12,10 +12,24 @@
   font-weight: 600;
 }
 
+.el-form--label-top .el-form-item .el-form-item__label {
+  height: auto;
+  margin-bottom: 7px;
+  padding: 0;
+  line-height: 1.35;
+}
+
+.el-form-item,
+.el-form-item__content {
+  min-width: 0;
+}
+
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select__wrapper {
+  border-radius: var(--radius-sm);
   box-shadow: 0 0 0 1px var(--line-strong) inset;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
 }
 
 .el-input__wrapper:hover,
@@ -24,8 +38,21 @@
 }
 
 .el-input__wrapper.is-focus,
-.el-textarea__inner:focus {
-  box-shadow: 0 0 0 1px var(--primary) inset, 0 0 0 3px rgb(29 78 216 / 10%);
+.el-textarea__inner:focus,
+.el-select__wrapper.is-focused {
+  background: #fff;
+  box-shadow: 0 0 0 1.5px #667085 inset, 0 0 0 3px rgb(71 84 103 / 10%) !important;
+}
+
+.el-button {
+  border-radius: var(--radius-sm);
+}
+
+.el-button > span,
+.el-tag__content {
+  min-width: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .el-tag {

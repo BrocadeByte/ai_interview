@@ -50,15 +50,21 @@ class Settings(BaseSettings):
     db_pool_timeout_seconds: int = 30
     llm_request_timeout_seconds: int = 120
     llm_max_retries: int = 2
+    resume_parse_model: str = ""
+    resume_parse_timeout_seconds: int = 35
     embedding_cache_size: int = 512
     embedding_cache_ttl_seconds: int = 3600
     rabbitmq_url: str = "amqp://admin:admin123@192.168.150.101:5672/"
     rabbitmq_ingestion_queue: str = "knowledge.ingestion"
     rabbitmq_ingestion_exchange: str = "knowledge.ingestion.exchange"
     rabbitmq_ingestion_dlx: str = "knowledge.ingestion.dlx"
+    rabbitmq_resume_queue: str = "resume.parsing"
+    rabbitmq_resume_exchange: str = "resume.parsing.exchange"
+    rabbitmq_resume_dlx: str = "resume.parsing.dlx"
     rabbitmq_prefetch_count: int = 2
     knowledge_ingestion_max_attempts: int = 3
     rabbitmq_connect_timeout_seconds: int = 10
+    healthcheck_timeout_seconds: float = 2.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

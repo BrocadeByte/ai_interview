@@ -1,6 +1,7 @@
 import json
 
 from app.agents.nodes.interview_planner import normalize_interview_plan
+from app.api.interviews import attach_current_plan_fields
 from app.models.interview import InterviewMessage, InterviewSession
 from app.services.interview_state_service import build_state_from_session
 
@@ -67,3 +68,16 @@ def test_plan_with_ten_dimensions_is_rebalanced_to_eight_questions() -> None:
     assert len(plan) == 8
     assert sum(item["question_count"] for item in plan) == 8
     assert abs(sum(item["weight"] for item in plan) - 1) < 1e-9
+
+
+def test_session_response_uses_persisted_short_plan_question_count() -> None:
+    session = build_session(message_dimension=None)
+    session.interview_plan_json = json.dumps(
+        [{"dimension": "来源短板再测", "question_count": 2, "weight": 1.0, "focus": "同类能力点"}],
+        ensure_ascii=False,
+    )
+
+    attach_current_plan_fields(session)
+
+    assert session.total_question_count == 2
+    assert session.current_dimension == "来源短板再测"

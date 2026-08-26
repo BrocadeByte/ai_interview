@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -24,8 +25,11 @@ import app.api.interviews as interviews_api
 import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base, get_db
-from app.main import app
-from app.models.interview import InterviewMemory
+from app.main import app, ensure_interview_report_columns
+from app.models.interview import InterviewMemory, InterviewSession
+from app.models.report import InterviewReport
+from app.models.score import InterviewScore
+from app.models.user import User
 from app.services import interview_memory_service
 
 
@@ -171,15 +175,146 @@ async def test_register_profile_interview_answer_report_flow(client: AsyncClient
     assert scores[0]["score"] == 82
     assert scores[0]["dimension"] == "项目经验"
 
+    first_preview_response = await client.get(
+        f"/api/interviews/{interview['id']}/report", headers=headers
+    )
+    assert first_preview_response.status_code == 200
+    first_preview = first_preview_response.json()
+    assert first_preview["id"] is None
+    assert first_preview["is_final"] is False
+    assert first_preview["generated_from_score_count"] == 1
+    assert (
+        await client.get(f"/api/interviews/{interview['id']}/question-reviews", headers=headers)
+    ).status_code == 409
+    assert (await client.get("/api/reports", headers=headers)).json() == []
+    async with test_session_factory() as db:
+        assert await db.scalar(
+            text("SELECT COUNT(*) FROM interview_reports WHERE session_id = :session_id"),
+            {"session_id": interview["id"]},
+        ) == 0
+
+    second_answer_response = await client.post(
+        f"/api/interviews/{interview['id']}/answer",
+        headers=headers,
+        json={"answer": "我通过统一异常处理和审计日志完善了鉴权链路。", "request_id": str(uuid4())},
+    )
+    assert second_answer_response.status_code == 200
+    scores = (await client.get(f"/api/interviews/{interview['id']}/scores", headers=headers)).json()
+    assert len(scores) == 2
+
+    second_preview_response = await client.get(
+        f"/api/interviews/{interview['id']}/report", headers=headers
+    )
+    assert second_preview_response.status_code == 200
+    second_preview = second_preview_response.json()
+    assert second_preview["id"] is None
+    assert second_preview["is_final"] is False
+    assert second_preview["generated_from_score_count"] == 2
+    async with test_session_factory() as db:
+        assert await db.scalar(
+            text("SELECT COUNT(*) FROM interview_reports WHERE session_id = :session_id"),
+            {"session_id": interview["id"]},
+        ) == 0
+
+    finish_response = await client.post(f"/api/interviews/{interview['id']}/finish", headers=headers)
+    assert finish_response.status_code == 200
+    assert finish_response.json()["status"] == "finished"
+
     report_response = await client.get(f"/api/interviews/{interview['id']}/report", headers=headers)
     assert report_response.status_code == 200
     report = report_response.json()
+    assert report["id"] is not None
+    assert report["is_final"] is True
+    assert report["generated_from_score_count"] == 2
     assert report["total_score"] == 82
     assert report["summary"] == "整体表现良好。"
     assert report["dimension_scores"]
     assert report["dimension_scores"][0]["dimension"] == "项目经验"
     assert report["dimension_scores"][0]["score"] == 82
-    assert report["dimension_scores"][0]["question_indexes"] == [1]
+    assert report["dimension_scores"][0]["question_indexes"] == [1, 2]
+    listed_reports = (await client.get("/api/reports", headers=headers)).json()
+    assert [item["id"] for item in listed_reports] == [report["id"]]
+
+    report_reviews_response = await client.get(
+        f"/api/reports/{report['id']}/question-reviews",
+        headers=headers,
+    )
+    assert report_reviews_response.status_code == 200
+    report_reviews = report_reviews_response.json()
+    assert len(report_reviews) == len(scores) == 2
+    assert {item["score_id"] for item in report_reviews} == {item["id"] for item in scores}
+    assert all(item["question"] for item in report_reviews)
+    assert all(item["answer"] for item in report_reviews)
+    assert all(item["deduction_reasons"] for item in report_reviews)
+    assert all(item["suggested_structure"] for item in report_reviews)
+    assert all(item["sample_answer"] for item in report_reviews)
+    assert all("[真实" in item["sample_answer"] for item in report_reviews)
+
+    session_reviews_response = await client.get(
+        f"/api/interviews/{interview['id']}/question-reviews",
+        headers=headers,
+    )
+    assert session_reviews_response.status_code == 200
+    session_reviews = session_reviews_response.json()
+    assert [item["id"] for item in session_reviews] == [item["id"] for item in report_reviews]
+    assert [item["sample_answer"] for item in session_reviews] == [
+        item["sample_answer"] for item in report_reviews
+    ]
+
+    async with test_session_factory() as db:
+        stored_review_count = await db.scalar(
+            text("SELECT COUNT(*) FROM question_reviews WHERE report_id = :report_id"),
+            {"report_id": report["id"]},
+        )
+    assert stored_review_count == 2
+
+    first_snapshot = report_reviews[0]
+    async with test_session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE interview_scores SET answer = :answer, reason = :reason "
+                "WHERE id = :score_id"
+            ),
+            {
+                "score_id": first_snapshot["score_id"],
+                "answer": "后续修改的评分来源回答",
+                "reason": "后续修改的评分来源原因",
+            },
+        )
+        await db.commit()
+    stable_reviews = (
+        await client.get(f"/api/reports/{report['id']}/question-reviews", headers=headers)
+    ).json()
+    assert stable_reviews[0]["answer"] == first_snapshot["answer"]
+    assert stable_reviews[0]["deduction_reasons"] == first_snapshot["deduction_reasons"]
+    assert stable_reviews[0]["sample_answer"] == first_snapshot["sample_answer"]
+    stable_report = (await client.get(f"/api/reports/{report['id']}", headers=headers)).json()
+    assert stable_report["summary"] == report["summary"]
+    assert stable_report["generated_from_score_count"] == 2
+
+    async with test_session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE question_reviews SET suggested_structure_json = '[]', sample_answer = '' "
+                "WHERE id = :review_id"
+            ),
+            {"review_id": first_snapshot["id"]},
+        )
+        await db.commit()
+    repaired_reviews = (
+        await client.get(f"/api/reports/{report['id']}/question-reviews", headers=headers)
+    ).json()
+    assert repaired_reviews[0]["suggested_structure"]
+    assert repaired_reviews[0]["sample_answer"]
+    assert "[真实" in repaired_reviews[0]["sample_answer"]
+
+    other_headers = await register_and_fill_profile(client)
+    assert (
+        await client.get(f"/api/reports/{report['id']}/question-reviews", headers=other_headers)
+    ).status_code == 404
+    assert (
+        await client.get(f"/api/interviews/{interview['id']}/question-reviews", headers=other_headers)
+    ).status_code == 404
 
 
 @pytest.mark.anyio
@@ -325,18 +460,18 @@ async def test_start_stream_emits_first_question_deltas(client: AsyncClient) -> 
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
     assert events[0] == "status"
-    assert "delta" in events
+    assert "draft_delta" in events
     assert events[-1] == "complete"
-    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "delta")
+    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "draft_delta")
     assert events.index("text_done") < events.index("complete")
 
-    delta_text = "".join(
+    draft_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: delta")
+        if frame.startswith("event: draft_delta")
     )
     completed = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    assert delta_text == completed["messages"][-1]["content"]
+    assert draft_text == completed["messages"][-1]["content"]
     assert completed["status"] == "active"
     assert interview_planner.format_knowledge_context.calls == 1
     assert interview_planner.llm.calls == 1
@@ -363,18 +498,18 @@ async def test_answer_stream_emits_deltas_before_complete(client: AsyncClient) -
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
     assert events[0] == "status"
-    assert "delta" in events
+    assert "draft_delta" in events
     assert events[-1] == "complete"
-    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "delta")
+    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "draft_delta")
     assert events.index("text_done") < events.index("complete")
 
-    delta_text = "".join(
+    draft_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: delta")
+        if frame.startswith("event: draft_delta")
     )
     completed = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    assert delta_text == completed["messages"][-1]["content"]
+    assert draft_text == completed["messages"][-1]["content"]
     assert completed["messages"][-1]["role"] == "assistant"
 
 @pytest.mark.anyio
@@ -476,6 +611,108 @@ async def test_finish_interview_marks_session_finished(client: AsyncClient) -> N
 
 
 @pytest.mark.anyio
+async def test_report_lifecycle_migration_distinguishes_final_reports_from_old_previews(
+    test_session_factory,
+) -> None:
+    base_time = datetime(2026, 8, 23, 10, 0, 0)
+    async with test_session_factory() as db:
+        user = User(email="report-migration@example.com", username="report-migration", password_hash="x")
+        db.add(user)
+        await db.flush()
+        sessions = [
+            InterviewSession(
+                user_id=user.id,
+                target_position="stale preview",
+                difficulty="medium",
+                status="finished",
+                session_purpose="full_interview",
+            ),
+            InterviewSession(
+                user_id=user.id,
+                target_position="historical final",
+                difficulty="medium",
+                status="finished",
+                session_purpose="full_interview",
+            ),
+            InterviewSession(
+                user_id=user.id,
+                target_position="active preview",
+                difficulty="medium",
+                status="active",
+                session_purpose="full_interview",
+            ),
+        ]
+        db.add_all(sessions)
+        await db.flush()
+
+        def score(session_id: int, index: int, created_at: datetime) -> InterviewScore:
+            return InterviewScore(
+                session_id=session_id,
+                question_index=index,
+                question=f"question {index}",
+                answer=f"answer {index}",
+                dimension="general",
+                score=80,
+                sub_scores="{}",
+                reason="reason",
+                weaknesses="[]",
+                suggestions="[]",
+                created_at=created_at,
+            )
+
+        db.add_all([
+            score(sessions[0].id, 1, base_time),
+            score(sessions[0].id, 2, base_time + timedelta(minutes=2)),
+            score(sessions[1].id, 1, base_time),
+            score(sessions[2].id, 1, base_time),
+        ])
+
+        def report(session_id: int, updated_at: datetime) -> InterviewReport:
+            return InterviewReport(
+                session_id=session_id,
+                total_score=80,
+                summary="snapshot",
+                strengths="[]",
+                weaknesses="[]",
+                suggestions="[]",
+                learning_path="[]",
+                sample_answer="sample",
+                created_at=updated_at,
+                updated_at=updated_at,
+            )
+
+        reports = [
+            report(sessions[0].id, base_time + timedelta(minutes=1)),
+            report(sessions[1].id, base_time + timedelta(minutes=1)),
+            report(sessions[2].id, base_time + timedelta(minutes=1)),
+        ]
+        db.add_all(reports)
+        await db.commit()
+        report_ids = [item.id for item in reports]
+
+    test_engine = test_session_factory.kw["bind"]
+    async with test_engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE interview_reports DROP COLUMN is_final"))
+        await conn.execute(
+            text("ALTER TABLE interview_reports DROP COLUMN generated_from_score_count")
+        )
+        await ensure_interview_report_columns(conn)
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, is_final, generated_from_score_count FROM interview_reports "
+                    "ORDER BY id"
+                )
+            )
+        ).fetchall()
+
+    migrated = {row[0]: (bool(row[1]), row[2]) for row in rows}
+    assert migrated[report_ids[0]] == (False, 2)
+    assert migrated[report_ids[1]] == (True, 1)
+    assert migrated[report_ids[2]] == (False, 1)
+
+
+@pytest.mark.anyio
 async def test_answer_compacts_medium_memory_when_context_exceeds_threshold(
     client: AsyncClient,
     test_session_factory,
@@ -534,15 +771,15 @@ async def test_answer_compacts_medium_memory_when_context_exceeds_threshold(
 def _stream_frames(response) -> tuple[list[str], list[str], str, dict]:
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
-    delta_text = "".join(
+    draft_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: delta")
+        if frame.startswith("event: draft_delta")
     )
     text_done_frame = next(frame for frame in frames if frame.startswith("event: text_done"))
     text_done_content = __import__("json").loads(text_done_frame.split("data: ", 1)[1])["content"]
     complete = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    return frames, events, delta_text, {"text_done": text_done_content, "complete": complete}
+    return frames, events, draft_text, {"text_done": text_done_content, "complete": complete}
 
 
 @pytest.mark.anyio
@@ -563,12 +800,12 @@ async def test_invalid_json_stream_publishes_only_committed_fallback(client: Asy
     )
 
     assert response.status_code == 200
-    _frames, events, delta_text, payloads = _stream_frames(response)
+    _frames, events, draft_text, payloads = _stream_frames(response)
     complete = payloads["complete"]
     committed_text = complete["messages"][-1]["content"]
-    assert events[-3:] == ["delta", "text_done", "complete"] or events[-2:] == ["text_done", "complete"]
-    assert delta_text == payloads["text_done"] == committed_text
-    assert "not valid json" not in delta_text
+    assert events[-2:] == ["text_done", "complete"]
+    assert draft_text == ""
+    assert payloads["text_done"] == committed_text
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed_text
 
@@ -597,10 +834,11 @@ async def test_duplicate_question_stream_publishes_replacement_saved_to_database
     )
 
     assert response.status_code == 200
-    _frames, _events, delta_text, payloads = _stream_frames(response)
+    _frames, _events, draft_text, payloads = _stream_frames(response)
     committed_text = payloads["complete"]["messages"][-1]["content"]
     assert committed_text != repeated
-    assert delta_text == payloads["text_done"] == committed_text
+    assert draft_text == repeated
+    assert payloads["text_done"] == committed_text
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed_text
 
@@ -647,13 +885,14 @@ async def test_followup_limit_stream_discards_model_followup_and_saves_next_main
     )
 
     assert response.status_code == 200
-    _frames, _events, delta_text, payloads = _stream_frames(response)
+    _frames, _events, draft_text, payloads = _stream_frames(response)
     complete = payloads["complete"]
     committed = complete["messages"][-1]
     assert complete["current_question_index"] == 2
     assert committed["is_followup"] == 0
     assert committed["content"] != "followup 3?"
-    assert delta_text == payloads["text_done"] == committed["content"]
+    assert draft_text == ""
+    assert payloads["text_done"] == committed["content"]
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed["content"]
 

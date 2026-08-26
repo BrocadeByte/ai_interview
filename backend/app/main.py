@@ -4,16 +4,18 @@ from collections.abc import AsyncGenerator
 import logging
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 import app.models  # noqa: F401
-from app.api import auth, interviews, knowledge, knowledge_async, profiles, reports
+from app.api import analytics, auth, interviews, job_descriptions, knowledge, knowledge_async, practice, profiles, reports, resumes
 from app.core.config import settings
 from app.core.database import Base, engine
 from app.rag.embeddings import close_embedding_session
 from app.rag.retriever import close_retriever_client, warm_retriever
+from app.services.health_service import readiness_status
 
 
 logging.basicConfig(
@@ -120,12 +122,38 @@ async def ensure_interview_session_columns(conn) -> None:
     existing_columns = {row[0] for row in result.fetchall()}
     migrations = {
         "interview_plan_json": "ALTER TABLE interview_sessions ADD COLUMN interview_plan_json TEXT NULL",
+        "mode": "ALTER TABLE interview_sessions ADD COLUMN mode VARCHAR(40) NOT NULL DEFAULT 'training'",
+        "interview_type": "ALTER TABLE interview_sessions ADD COLUMN interview_type VARCHAR(40) NOT NULL DEFAULT 'mixed'",
+        "resume_id": "ALTER TABLE interview_sessions ADD COLUMN resume_id INT NULL",
+        "resume_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN resume_snapshot_json LONGTEXT NULL",
+        "job_description_id": "ALTER TABLE interview_sessions ADD COLUMN job_description_id INT NULL",
+        "job_description_snapshot_json": "ALTER TABLE interview_sessions ADD COLUMN job_description_snapshot_json LONGTEXT NULL",
+        "practice_context_json": "ALTER TABLE interview_sessions ADD COLUMN practice_context_json LONGTEXT NULL",
+        "parent_session_id": "ALTER TABLE interview_sessions ADD COLUMN parent_session_id INT NULL",
+        "source_report_id": "ALTER TABLE interview_sessions ADD COLUMN source_report_id INT NULL",
+        "source_weakness_key": "ALTER TABLE interview_sessions ADD COLUMN source_weakness_key VARCHAR(255) NULL",
+        "session_purpose": "ALTER TABLE interview_sessions ADD COLUMN session_purpose VARCHAR(40) NOT NULL DEFAULT 'full_interview'",
+        "comparison_group_id": "ALTER TABLE interview_sessions ADD COLUMN comparison_group_id VARCHAR(64) NULL",
         "processing_request_id": "ALTER TABLE interview_sessions ADD COLUMN processing_request_id VARCHAR(36) NULL",
         "processing_started_at": "ALTER TABLE interview_sessions ADD COLUMN processing_started_at DATETIME NULL",
     }
     for column, statement in migrations.items():
         if column not in existing_columns:
             await conn.execute(text(statement))
+    indexes = (await conn.execute(text("SHOW INDEX FROM interview_sessions"))).fetchall()
+    existing_indexes = {str(row[2]) for row in indexes}
+    required_indexes = {
+        "ix_interview_sessions_resume_id": "resume_id",
+        "ix_interview_sessions_job_description_id": "job_description_id",
+        "ix_interview_sessions_parent_session_id": "parent_session_id",
+        "ix_interview_sessions_source_report_id": "source_report_id",
+        "ix_interview_sessions_comparison_group_id": "comparison_group_id",
+    }
+    for index_name, column_name in required_indexes.items():
+        if index_name not in existing_indexes:
+            await conn.execute(
+                text(f"ALTER TABLE interview_sessions ADD INDEX {index_name} ({column_name})")
+            )
 
 
 async def ensure_interview_report_columns(conn) -> None:
@@ -138,6 +166,43 @@ async def ensure_interview_report_columns(conn) -> None:
     for column, statement in migrations.items():
         if column not in existing_columns:
             await conn.execute(text(statement))
+    if "is_final" not in existing_columns:
+        await conn.execute(text("ALTER TABLE interview_reports ADD COLUMN is_final BOOL NULL"))
+        await conn.execute(
+            text(
+                "UPDATE interview_reports AS report "
+                "JOIN interview_sessions AS session ON session.id = report.session_id "
+                "SET report.is_final = (session.status = 'finished' "
+                "AND session.session_purpose = 'full_interview' "
+                "AND NOT EXISTS (SELECT 1 FROM interview_scores AS newer_score "
+                "WHERE newer_score.session_id = report.session_id "
+                "AND newer_score.created_at > COALESCE(report.updated_at, report.created_at)) "
+                "AND (NOT EXISTS (SELECT 1 FROM question_reviews AS review "
+                "WHERE review.report_id = report.id) "
+                "OR (SELECT COUNT(*) FROM question_reviews AS review_count "
+                "WHERE review_count.report_id = report.id) = "
+                "(SELECT COUNT(*) FROM interview_scores AS score_count "
+                "WHERE score_count.session_id = report.session_id)))"
+            )
+        )
+        await conn.execute(text("UPDATE interview_reports SET is_final = FALSE WHERE is_final IS NULL"))
+        await conn.execute(
+            text("ALTER TABLE interview_reports MODIFY COLUMN is_final BOOL NOT NULL DEFAULT TRUE")
+        )
+    if "generated_from_score_count" not in existing_columns:
+        await conn.execute(
+            text(
+                "ALTER TABLE interview_reports "
+                "ADD COLUMN generated_from_score_count INT NOT NULL DEFAULT 0"
+            )
+        )
+        await conn.execute(
+            text(
+                "UPDATE interview_reports AS report SET generated_from_score_count = "
+                "(SELECT COUNT(*) FROM interview_scores AS score "
+                "WHERE score.session_id = report.session_id)"
+            )
+        )
 
 
 async def ensure_interview_score_columns(conn) -> None:
@@ -164,14 +229,30 @@ app.add_middleware(
 )
 
 
-@app.get("/api/health")
-def health() -> dict[str, str]:
+@app.get("/api/health/live")
+def health_live() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/health/ready")
+async def health_ready() -> JSONResponse:
+    payload, status_code = await readiness_status()
+    return JSONResponse(content=payload, status_code=status_code)
+
+
+@app.get("/api/health")
+async def health() -> JSONResponse:
+    """Backward-compatible readiness endpoint for existing deployment checks."""
+    return await health_ready()
 
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(interviews.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+app.include_router(practice.router, prefix="/api")
+app.include_router(resumes.router, prefix="/api")
+app.include_router(job_descriptions.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
 app.include_router(knowledge_async.router, prefix="/api")

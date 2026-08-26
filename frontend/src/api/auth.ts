@@ -16,6 +16,14 @@ export interface AuthResponse {
   user: User
 }
 
+export interface SessionResponse {
+  authenticated: boolean
+  access_token?: string | null
+  token_type?: string | null
+  expires_in?: number | null
+  user?: User | null
+}
+
 export function register(data: { email: string; username: string; password: string }) {
   return apiClient.post<AuthResponse>('/auth/register', data)
 }
@@ -30,6 +38,10 @@ export function fetchMe() {
 
 export function refreshSession() {
   return apiClient.post<AuthResponse>('/auth/refresh')
+}
+
+export function fetchSession() {
+  return apiClient.get<SessionResponse>('/auth/session')
 }
 
 export function logoutSession() {

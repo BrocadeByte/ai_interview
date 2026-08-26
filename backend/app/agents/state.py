@@ -11,8 +11,14 @@ MessageRole = Literal["assistant", "user", "system"]
 # 面试难度，和接口层 InterviewCreate 里的 difficulty 保持一致。
 InterviewDifficulty = Literal["easy", "medium", "hard"]
 
+InterviewMode = Literal["training", "mock"]
+
+InterviewType = Literal["hr", "project_deep_dive", "technical_basics", "system_design", "mixed"]
+
+InterviewPurpose = Literal["full_interview", "weakness_practice", "retest"]
+
 # 面试会话状态，和 interview_sessions.status 字段保持一致。
-InterviewStatus = Literal["active", "finished"]
+InterviewStatus = Literal["preparing", "active", "finished"]
 
 InterviewAction = Literal["start", "answer", "finish"]
 
@@ -87,14 +93,27 @@ class InterviewState(TypedDict):
     target_position: str
     # 当前面试难度。
     difficulty: InterviewDifficulty
+    # 训练模式会提供即时反馈，实战模式把反馈留到结束后。
+    mode: InterviewMode
+    # 本场面试的题目类型。
+    interview_type: InterviewType
     # 当前面试状态。
     status: InterviewStatus
     # 用户求职画像，来自 user_profiles 表。
     profile: dict[str, Any]
     # 简历结构化信息；第一版没有简历模块时可以为空。
     resume: dict[str, Any] | None
+    resume_id: int | None
     # 目标岗位信息；后续接 JD 或岗位知识库时可以放更完整的岗位要求。
     target_job: dict[str, Any]
+    job_description_id: int | None
+    # 专项练习或再测的来源信息。
+    parent_session_id: int | None
+    source_report_id: int | None
+    source_weakness_key: str | None
+    practice_context: dict[str, Any]
+    session_purpose: InterviewPurpose
+    comparison_group_id: str | None
     # 面试计划，通常由 interview_planner 节点生成。
     interview_plan: list[InterviewPlanItem]
     # 当前正在考察的维度。
@@ -127,6 +146,18 @@ def create_initial_state(
     target_position: str,
     difficulty: InterviewDifficulty,
     profile: dict[str, Any],
+    mode: InterviewMode = "training",
+    interview_type: InterviewType = "mixed",
+    resume: dict[str, Any] | None = None,
+    resume_id: int | None = None,
+    target_job: dict[str, Any] | None = None,
+    job_description_id: int | None = None,
+    parent_session_id: int | None = None,
+    source_report_id: int | None = None,
+    source_weakness_key: str | None = None,
+    practice_context: dict[str, Any] | None = None,
+    session_purpose: InterviewPurpose = "full_interview",
+    comparison_group_id: str | None = None,
 ) -> InterviewState:
     # 创建一份干净的初始状态，供创建面试会话或启动 LangGraph 时使用。
     return {
@@ -135,10 +166,20 @@ def create_initial_state(
         "session_id": session_id,
         "target_position": target_position,
         "difficulty": difficulty,
+        "mode": mode,
+        "interview_type": interview_type,
         "status": "active",
         "profile": profile,
-        "resume": None,
-        "target_job": {"position": target_position},
+        "resume": resume,
+        "resume_id": resume_id,
+        "target_job": target_job or {"position": target_position},
+        "job_description_id": job_description_id,
+        "parent_session_id": parent_session_id,
+        "source_report_id": source_report_id,
+        "source_weakness_key": source_weakness_key,
+        "practice_context": practice_context or {},
+        "session_purpose": session_purpose,
+        "comparison_group_id": comparison_group_id,
         "interview_plan": [],
         "current_dimension": "",
         "current_question": "",

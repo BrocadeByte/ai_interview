@@ -37,7 +37,7 @@ async function submit() {
         <strong>智面 AI</strong>
       </div>
       <div class="auth-pitch">
-        <span class="eyebrow eyebrow-light">YOUR CAREER COPILOT</span>
+        <span class="eyebrow eyebrow-light">你的求职训练搭档</span>
         <h1>三分钟建立求职画像，<br />开始岗位定制训练。</h1>
         <p>记录你的技术能力、项目经历和目标岗位，让每轮训练都更贴合真实求职准备。</p>
       </div>
@@ -51,7 +51,7 @@ async function submit() {
     <section class="auth-form-area">
       <div class="auth-panel">
         <div class="auth-heading">
-          <span class="eyebrow">GET STARTED</span>
+          <span class="eyebrow">开始训练</span>
           <h2>创建求职者账号</h2>
           <p>完善个人画像，开始第一场岗位定制训练</p>
         </div>

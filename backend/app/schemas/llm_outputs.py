@@ -59,8 +59,8 @@ class VisibleQuestionOutput(StrictLlmOutput):
 
 class AnswerPipelineOutput(StrictLlmOutput):
     needs_followup: StrictBool
-    decision_reason: NonEmptyText
     question: str
+    decision_reason: NonEmptyText
     score: ScoreValue
     sub_scores: dict[str, ScoreValue]
     reason: NonEmptyText

@@ -24,6 +24,6 @@ USER app
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-    CMD curl --fail --silent http://127.0.0.1:8000/api/health || exit 1
+    CMD curl --fail --silent http://127.0.0.1:8000/api/health/ready || exit 1
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

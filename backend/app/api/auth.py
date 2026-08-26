@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.profile import UserProfile
 from app.models.user import User
-from app.schemas.user import Token, UserCreate, UserLogin, UserRead
+from app.schemas.user import SessionStatus, Token, UserCreate, UserLogin, UserRead
 from app.services.auth_service import (
     RefreshTokenError,
     create_auth_session,
@@ -87,6 +87,40 @@ async def refresh(request: Request, db: AsyncSession = Depends(get_db)) -> Token
         return _unauthorized_refresh_response()
 
     response = JSONResponse(content=_token_response(user, session.id).model_dump(mode="json"))
+    _set_refresh_cookie(response, rotated_token, session.expires_at)
+    return response
+
+
+# 匿名安全的会话探测始终返回 200；存在有效 Refresh Token 时同时完成轮换续期。
+@router.get("/session", response_model=SessionStatus)
+async def session_status(request: Request, db: AsyncSession = Depends(get_db)) -> Response:
+    refresh_token = request.cookies.get(settings.refresh_cookie_name)
+    if not refresh_token:
+        return _session_status_response(SessionStatus(authenticated=False))
+    try:
+        user, session, rotated_token = await rotate_refresh_token(
+            db,
+            refresh_token,
+            **_request_metadata(request),
+        )
+        await db.commit()
+        await db.refresh(user)
+    except RefreshTokenError:
+        await db.commit()
+        response = _session_status_response(SessionStatus(authenticated=False))
+        _clear_refresh_cookie(response)
+        return response
+
+    token = _token_response(user, session.id)
+    response = _session_status_response(
+        SessionStatus(
+            authenticated=True,
+            access_token=token.access_token,
+            token_type=token.token_type,
+            expires_in=token.expires_in,
+            user=token.user,
+        )
+    )
     _set_refresh_cookie(response, rotated_token, session.expires_at)
     return response
 
@@ -172,3 +206,10 @@ def _unauthorized_refresh_response() -> JSONResponse:
     )
     _clear_refresh_cookie(response)
     return response
+
+
+def _session_status_response(payload: SessionStatus) -> JSONResponse:
+    return JSONResponse(
+        content=payload.model_dump(mode="json"),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )

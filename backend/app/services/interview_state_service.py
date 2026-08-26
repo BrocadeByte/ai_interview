@@ -7,6 +7,8 @@ from app.agents.nodes.interview_planner import get_plan_item_for_question
 from app.agents.state import InterviewState, create_initial_state
 from app.models.interview import InterviewMemory, InterviewMessage, InterviewSession
 from app.models.profile import UserProfile
+from app.services.job_description_service import load_job_description_snapshot
+from app.services.resume_service import load_resume_snapshot
 
 
 def profile_to_dict(profile: UserProfile | None) -> dict:
@@ -72,6 +74,21 @@ def build_state_from_session(
         target_position=session.target_position,
         difficulty=session.difficulty,  # type: ignore[arg-type]
         profile=profile_to_dict(profile),
+        mode=(getattr(session, "mode", None) or "training"),  # type: ignore[arg-type]
+        interview_type=(getattr(session, "interview_type", None) or "mixed"),  # type: ignore[arg-type]
+        resume=load_resume_snapshot(getattr(session, "resume_snapshot_json", None)),
+        resume_id=getattr(session, "resume_id", None),
+        target_job=load_job_description_snapshot(
+            getattr(session, "job_description_snapshot_json", None),
+            session.target_position,
+        ),
+        job_description_id=getattr(session, "job_description_id", None),
+        parent_session_id=getattr(session, "parent_session_id", None),
+        source_report_id=getattr(session, "source_report_id", None),
+        source_weakness_key=getattr(session, "source_weakness_key", None),
+        practice_context=load_practice_context(getattr(session, "practice_context_json", None)),
+        session_purpose=(getattr(session, "session_purpose", None) or "full_interview"),  # type: ignore[arg-type]
+        comparison_group_id=getattr(session, "comparison_group_id", None),
     )
     state["status"] = session.status  # type: ignore[assignment]
     state["interview_plan"] = parse_interview_plan(session.interview_plan_json)
@@ -125,3 +142,14 @@ def parse_interview_plan(plan_json: str | None) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return data if isinstance(data, list) else []
+
+
+def load_practice_context(context_json: str | None) -> dict:
+    """Load the immutable practice source snapshot; invalid legacy content is ignored."""
+    if not context_json:
+        return {}
+    try:
+        data = json.loads(context_json)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}

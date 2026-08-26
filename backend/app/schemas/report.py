@@ -15,7 +15,7 @@ class ReportDimensionScore(BaseModel):
 
 
 class InterviewReportRead(BaseModel):
-    id: int
+    id: int | None
     session_id: int
     total_score: int
     summary: str
@@ -26,6 +26,8 @@ class InterviewReportRead(BaseModel):
     learning_path: list[str]
     sample_answer: str
     citations: list[KnowledgeCitation] = Field(default_factory=list)
+    is_final: bool
+    generated_from_score_count: int = Field(ge=0)
     created_at: datetime
     updated_at: datetime
 

@@ -24,7 +24,8 @@ SYSTEM_PROMPT = """
 4. 如果历史回答过于笼统，可以继续追问细节。
 5. 优先参考知识库里的岗位能力模型、常见追问、评分要点和优秀回答样例。
 6. 不要重复已经问过的主问题或追问。
-7. 必须输出 JSON，不要输出 Markdown。
+7. 专项练习和再测必须持续围绕练习来源快照中的目标短板与维度；除 `repeat_question` 的第一题外，不得复述来源原题。再测题面不得泄露来源回答、扣分原因或改进提示。
+8. 必须输出 JSON，不要输出 Markdown。
 JSON 格式：{
   "question": "下一道面试问题",
   "dimension": "本题考察维度",
@@ -81,6 +82,8 @@ async def generate_question_node(state: InterviewState) -> dict:
 当前题号：{state["current_question_index"]}
 当前计划考察维度：{planned_dimension}
 当前维度考察重点：{planned_focus}
+会话用途：{state.get("session_purpose")}
+练习来源快照：{format_untrusted_data("practice_source_snapshot", state.get("practice_context"))}
 
 候选人画像：{format_untrusted_data("candidate_profile", state["profile"])}
 
@@ -105,7 +108,12 @@ async def generate_question_node(state: InterviewState) -> dict:
         user_prompt[:800],
     )
 
-    fallback_question = "请结合你的项目经历，介绍一个你解决复杂问题的案例，并说明背景、方案、结果和复盘。"
+    weakness_title = str((state.get("practice_context") or {}).get("weakness_title") or "").strip()
+    fallback_question = (
+        f"请结合一个尚未讨论的真实场景，说明你会如何改进“{weakness_title}”这一能力点。"
+        if state.get("session_purpose") in {"weakness_practice", "retest"} and weakness_title
+        else "请结合你的项目经历，介绍一个你解决复杂问题的案例，并说明背景、方案、结果和复盘。"
+    )
     fallback_dimension = planned_dimension or DEFAULT_INTERVIEW_PLAN[0]["dimension"]
 
     try:

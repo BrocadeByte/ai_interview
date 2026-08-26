@@ -120,13 +120,7 @@
 }
 
 .nav-item.active::after {
-  position: absolute;
-  right: 14px;
-  bottom: -15px;
-  left: 14px;
-  height: 2px;
-  content: "";
-  background: var(--primary);
+  display: none;
 }
 
 .user-menu {
@@ -222,7 +216,15 @@
 .knowledge-editor {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
+}
+
+.page-heading > *,
+.section-header > *,
+.panel-title-row > *,
+.form-section-heading > *,
+.panel-heading > * {
+  min-width: 0;
 }
 

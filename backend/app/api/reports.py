@@ -7,11 +7,42 @@ from app.core.database import get_db
 from app.models.interview import InterviewSession
 from app.models.report import InterviewReport
 from app.models.user import User
+from app.schemas.question_review import QuestionReviewRead
 from app.schemas.report import InterviewReportListItem, InterviewReportRead
+from app.services.analytics_service import record_analytics_event_safely
+from app.services.question_review_service import ensure_question_reviews
 from app.services.report_service import repair_report_if_incomplete, report_to_read
 
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+@router.get("/{report_id}/question-reviews", response_model=list[QuestionReviewRead])
+async def get_report_question_reviews(
+    report_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[QuestionReviewRead]:
+    """Return stable per-score review snapshots for a report owned by the user."""
+    row = await db.execute(
+        select(InterviewReport, InterviewSession)
+        .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
+        .where(
+            InterviewReport.id == report_id,
+            InterviewReport.is_final.is_(True),
+            InterviewSession.user_id == current_user.id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+        )
+    )
+    result = row.first()
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    report, _session = result
+    reviews = await ensure_question_reviews(db, report)
+    await db.commit()
+    return reviews
 
 
 # 获取当前登录用户的所有面试报告列表。
@@ -23,7 +54,12 @@ async def list_reports(
     rows = await db.execute(
         select(InterviewReport, InterviewSession)
         .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(InterviewSession.user_id == current_user.id)
+        .where(
+            InterviewSession.user_id == current_user.id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+            InterviewReport.is_final.is_(True),
+        )
         .order_by(InterviewReport.created_at.desc())
     )
 
@@ -51,7 +87,13 @@ async def get_report(
     row = await db.execute(
         select(InterviewReport, InterviewSession)
         .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(InterviewReport.id == report_id, InterviewSession.user_id == current_user.id)
+        .where(
+            InterviewReport.id == report_id,
+            InterviewReport.is_final.is_(True),
+            InterviewSession.user_id == current_user.id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+        )
     )
     result = row.first()
     if not result:
@@ -59,5 +101,15 @@ async def get_report(
 
     report, session = result
     if await repair_report_if_incomplete(db, report, session):
-        await db.commit()
+        await db.flush()
+    await ensure_question_reviews(db, report)
+    await record_analytics_event_safely(
+        db,
+        event_name="report_viewed",
+        user_id=current_user.id,
+        session_id=session.id,
+        report_id=report.id,
+        deduplication_key=f"report_viewed:{current_user.id}:{report.id}",
+    )
+    await db.commit()
     return report_to_read(report)

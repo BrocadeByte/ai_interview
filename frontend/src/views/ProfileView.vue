@@ -47,11 +47,11 @@ async function submit() {
     <section class="content profile-content">
       <header class="page-heading">
         <div>
-          <span class="eyebrow">CANDIDATE PROFILE</span>
+          <span class="eyebrow">求职画像</span>
           <h1>求职画像</h1>
           <p>完善经历与目标，让每次面试的问题更贴合你的真实背景。</p>
         </div>
-        <el-tag type="success" effect="plain" round><el-icon><Check /></el-icon>&nbsp;资料仅用于面试定制</el-tag>
+        <el-tag type="success" effect="plain" round class="privacy-tag"><el-icon><Check /></el-icon><span>资料仅用于面试定制</span></el-tag>
       </header>
 
       <el-form label-position="top" class="profile-form" @submit.prevent="submit">

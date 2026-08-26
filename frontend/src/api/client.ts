@@ -114,7 +114,7 @@ export async function authenticatedFetch(input: RequestInfo | URL, init: Request
 }
 
 function isRefreshExcludedEndpoint(url?: string) {
-  return /^\/auth\/(login|register|refresh|logout)$/.test(url || '')
+  return /^\/auth\/(login|register|refresh|session|logout)$/.test(url || '')
 }
 
 function dispatchAuthEvent(name: string, detail?: string) {
