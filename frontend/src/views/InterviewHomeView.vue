@@ -67,7 +67,7 @@ let profileGenerationSequence = 0
 let profileMaterialRevision = 0
 let resumeParsingTimer: ReturnType<typeof setInterval> | null = null
 
-const RESUME_PARSING_WAIT_SECONDS = 40
+const RESUME_PARSING_WAIT_SECONDS = 70
 
 class StaleProfileGenerationError extends Error {}
 
@@ -145,7 +145,7 @@ function beginResumeParsingNotice(id: number) {
   resumeParsingNotice.status = 'waiting'
   resumeParsingNotice.resumeId = id
   resumeParsingNotice.startedAt = Date.now()
-  resumeParsingNotice.message = '解析任务已提交，最多等待约 40 秒；完成或失败后会在这里显示结果。'
+  resumeParsingNotice.message = '解析任务已提交，最多等待约 70 秒；完成或失败后会在这里显示结果。'
   resumeParsingTimer = window.setInterval(updateResumeParsingElapsed, 500)
 }
 
@@ -573,7 +573,7 @@ function interviewTypeLabel(value: InterviewSession['interview_type']) {
                 <div class="resume-parsing-status-heading">
                   <strong>{{ resumeParsingNoticeTitle }}</strong>
                   <span v-if="resumeParsingNotice.status === 'waiting'">
-                    已等待 {{ resumeParsingNotice.elapsedSeconds }} 秒 / 最多约 40 秒
+                    已等待 {{ resumeParsingNotice.elapsedSeconds }} 秒 / 最多约 70 秒
                   </span>
                   <span v-else-if="resumeParsingNotice.elapsedSeconds">
                     用时约 {{ resumeParsingNotice.elapsedSeconds }} 秒

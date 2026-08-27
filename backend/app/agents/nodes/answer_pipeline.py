@@ -93,10 +93,8 @@ def build_fallback_question(target_position: str, dimension: str, focus: str) ->
 async def answer_pipeline_node(state: InterviewState) -> dict:
     """一次知识检索 + 一次模型调用，完成评分、追问判断和下一题生成。
 
-    合并原先 evaluate_answer → decide_followup → generate_question 三个串行节点，
-    将每轮回答的 LLM 调用从 3 次降到 1 次，首字延迟随之大幅下降。下一题维度按
-    下一计划项归类（修复原先按已答题目维度归类的偏差）；模型异常时使用兜底分
-    与兜底问题，保证状态图可继续运行。
+    下一题维度按下一计划项归类；模型异常时使用兜底分与兜底问题，保证状态图
+    可继续运行。
     """
     answer = _get_last_user_answer(state)
     plan = state["interview_plan"]

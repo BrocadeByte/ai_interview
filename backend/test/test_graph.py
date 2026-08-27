@@ -10,7 +10,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agents.graph import answer_graph, start_interview_graph
+from app.agents.graph import interview_graph
 from app.agents.state import create_initial_state
 
 
@@ -34,16 +34,17 @@ async def main() -> None:
     state["messages"].append(
         HumanMessage(content="我做过一个 AI 模拟面试系统，后端主要用了 FastAPI 和 MySQL。")
     )
-    # 3. 开始面试图：生成第一道问题。
-    result = await start_interview_graph.ainvoke(state)
+    # 3. 统一面试图的 start 动作：生成第一道问题。
+    result = await interview_graph.ainvoke(state)
 
     # 4. 模拟用户回答当前问题。真实接口里，这一步来自前端提交回答。
     result["messages"].append(
         HumanMessage(content="我使用 bcrypt 对密码进行哈希存储，登录成功后返回 JWT，后续接口通过 Bearer Token 鉴权。")
     )
+    result["action"] = "answer"
 
-    # 5. 用户回答后图：评分 -> 判断追问 -> 需要追问则生成追问，不需要追问则生成下一题。
-    result = await answer_graph.ainvoke(result)
+    # 5. 统一面试图的 answer 动作：一次完成评分、追问判断和下一题生成。
+    result = await interview_graph.ainvoke(result)
 
     # 7. 打印完整消息历史，方便你看 add_messages 是否自动合并。
     print("\n===== messages =====")

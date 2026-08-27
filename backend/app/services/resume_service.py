@@ -3,6 +3,7 @@ import json
 import logging
 import time
 import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,21 @@ from typing import Any
 from fastapi import HTTPException, UploadFile, status
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.schemas.resume import MAX_RESUME_TEXT_CHARS, ParsedResume, ResumeParseOutput, ResumeProfilePatch
+from app.models.profile import UserProfile
+from app.models.resume import Resume
+from app.schemas.resume import (
+    MAX_RESUME_TEXT_CHARS,
+    ParsedResume,
+    ResumeParseOutput,
+    ResumePaste,
+    ResumeProfilePatch,
+    ResumeRead,
+)
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.knowledge_file_service import (
     MAX_KNOWLEDGE_FILE_BYTES,
     get_document_parser,
@@ -36,6 +49,7 @@ RESUME_PARSE_SYSTEM_PROMPT = """
 
 
 logger = logging.getLogger(__name__)
+RESUME_QUEUE_PUBLISH_ERROR = "简历已保存，但解析任务提交失败，请稍后重新上传"
 
 
 @dataclass(frozen=True)
@@ -48,6 +62,216 @@ class ParsedResumeUpload:
 
 class ResumeParseTimeoutError(TimeoutError):
     """Raised when resume parsing exceeds its end-to-end time budget."""
+
+
+async def create_pasted_resume(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    payload: ResumePaste,
+    publish_task: Callable[..., Awaitable[None]],
+) -> ResumeRead:
+    """保存粘贴简历、发布异步解析任务并记录提交事件。"""
+    resume = Resume(
+        user_id=user_id,
+        title=payload.title,
+        source_type="paste",
+        raw_text=validate_resume_text(payload.content),
+        status="pending",
+    )
+    return await _save_and_publish_resume(db, resume, publish_task)
+
+
+async def create_uploaded_resume(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    file: UploadFile,
+    title: str | None,
+    publish_task: Callable[..., Awaitable[None]],
+) -> ResumeRead:
+    """解析上传文件文本、保存简历并发布异步结构化任务。"""
+    upload = await parse_resume_upload(file, title)
+    resume = Resume(
+        user_id=user_id,
+        title=upload.title,
+        source_type="upload",
+        file_name=upload.file_name,
+        file_type=upload.file_type,
+        raw_text=upload.raw_text,
+        status="pending",
+    )
+    return await _save_and_publish_resume(db, resume, publish_task)
+
+
+async def list_user_resumes(db: AsyncSession, user_id: int) -> list[ResumeRead]:
+    """按创建时间倒序返回用户的简历及解析状态。"""
+    rows = (
+        await db.scalars(
+            select(Resume)
+            .where(Resume.user_id == user_id)
+            .order_by(Resume.created_at.desc(), Resume.id.desc())
+        )
+    ).all()
+    return [to_resume_read(resume) for resume in rows]
+
+
+async def get_owned_resume(db: AsyncSession, resume_id: int, user_id: int) -> Resume:
+    """读取用户拥有的简历，不存在或越权时统一返回 404。"""
+    resume = await db.scalar(
+        select(Resume).where(Resume.id == resume_id, Resume.user_id == user_id)
+    )
+    if resume is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
+    return resume
+
+
+async def activate_owned_resume(
+    db: AsyncSession,
+    *,
+    resume_id: int,
+    user_id: int,
+) -> ResumeRead:
+    """把已解析简历设为当前唯一启用项。"""
+    resume = await get_owned_resume(db, resume_id, user_id)
+    if resume.status != "parsed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only a parsed resume can be activated",
+        )
+    await db.execute(
+        update(Resume)
+        .where(Resume.user_id == user_id, Resume.id != resume.id)
+        .values(is_active=False)
+    )
+    resume.is_active = True
+    await db.commit()
+    await db.refresh(resume)
+    return to_resume_read(resume)
+
+
+async def apply_resume_profile(
+    db: AsyncSession,
+    *,
+    resume_id: int,
+    user_id: int,
+) -> UserProfile:
+    """把用户确认的简历画像草稿覆盖到当前画像并记录来源。"""
+    resume = await get_owned_resume(db, resume_id, user_id)
+    if resume.status != "parsed" or not resume.profile_patch_json:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Resume has no parsed profile draft to apply",
+        )
+    try:
+        patch = ResumeProfilePatch.model_validate(load_json_object(resume.profile_patch_json))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Stored resume profile draft is invalid",
+        ) from exc
+
+    profile = await db.scalar(select(UserProfile).where(UserProfile.user_id == user_id))
+    if profile is None:
+        profile = UserProfile(user_id=user_id)
+    for field, value in patch.model_dump(exclude_none=True).items():
+        setattr(profile, field, value)
+    db.add(profile)
+    await record_analytics_event_safely(
+        db,
+        event_name="profile_applied",
+        user_id=user_id,
+        resume_id=resume.id,
+        deduplication_key=f"profile_applied:resume:{user_id}:{resume.id}",
+        properties={"source": "resume_profile_patch"},
+    )
+    await db.commit()
+    await db.refresh(profile)
+    return profile
+
+
+async def persist_pending_resume(db: AsyncSession, resume: Resume) -> Resume:
+    """提交待解析简历，确保消息队列只接收已持久化的记录 ID。"""
+    db.add(resume)
+    await db.commit()
+    await db.refresh(resume)
+    return resume
+
+
+async def publish_resume_task_or_fail(
+    db: AsyncSession,
+    resume: Resume,
+    publish_task: Callable[..., Awaitable[None]],
+) -> None:
+    """发布解析任务；发布失败时持久化稳定的失败状态供用户重试。"""
+    try:
+        await publish_task(resume.id, resume.user_id, attempt=1)
+    except Exception as exc:
+        resume.status = "failed"
+        resume.parsed_json = None
+        resume.profile_patch_json = None
+        resume.error_message = RESUME_QUEUE_PUBLISH_ERROR
+        await db.commit()
+        logger.error(
+            "resume.queue.publish.failed resume_id=%s user_id=%s attempt=1 error_type=%s",
+            resume.id,
+            resume.user_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=RESUME_QUEUE_PUBLISH_ERROR,
+        ) from exc
+
+
+async def record_resume_submission(db: AsyncSession, resume: Resume) -> None:
+    """记录简历漏斗事件，避免把非简历写入职责放进解析 Worker。"""
+    await record_analytics_event_safely(
+        db,
+        event_name="resume_uploaded" if resume.source_type == "upload" else "resume_pasted",
+        user_id=resume.user_id,
+        resume_id=resume.id,
+        deduplication_key=f"resume_{resume.source_type}:{resume.id}",
+        properties={"file_type": resume.file_type} if resume.file_type else None,
+    )
+    await db.commit()
+
+
+def to_resume_read(resume: Resume) -> ResumeRead:
+    """把简历 ORM 对象转换为包含结构化解析结果的响应模型。"""
+    parsed_data = load_json_object(resume.parsed_json)
+    profile_patch_data = load_json_object(resume.profile_patch_json)
+    return ResumeRead(
+        id=resume.id,
+        title=resume.title,
+        source_type=resume.source_type,
+        file_name=resume.file_name,
+        file_type=resume.file_type,
+        raw_text=resume.raw_text,
+        status=resume.status,
+        error_message=resume.error_message,
+        is_active=resume.is_active,
+        parsed=ParsedResume.model_validate(parsed_data) if parsed_data is not None else None,
+        profile_patch=(
+            ResumeProfilePatch.model_validate(profile_patch_data)
+            if profile_patch_data is not None
+            else None
+        ),
+        created_at=resume.created_at,
+        updated_at=resume.updated_at,
+    )
+
+
+async def _save_and_publish_resume(
+    db: AsyncSession,
+    resume: Resume,
+    publish_task: Callable[..., Awaitable[None]],
+) -> ResumeRead:
+    """复用粘贴与上传入口共有的保存、发布和埋点流程。"""
+    stored = await persist_pending_resume(db, resume)
+    await publish_resume_task_or_fail(db, stored, publish_task)
+    await record_resume_submission(db, stored)
+    return to_resume_read(stored)
 
 
 async def parse_resume_text(raw_text: str) -> ResumeParseOutput:

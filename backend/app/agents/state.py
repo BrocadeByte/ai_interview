@@ -159,7 +159,7 @@ def create_initial_state(
     session_purpose: InterviewPurpose = "full_interview",
     comparison_group_id: str | None = None,
 ) -> InterviewState:
-    # 创建一份干净的初始状态，供创建面试会话或启动 LangGraph 时使用。
+    """创建一份干净的初始状态，供面试 Service 启动 LangGraph。"""
     return {
         "action": "start",
         "user_id": user_id,

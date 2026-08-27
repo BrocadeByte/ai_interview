@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,10 +10,104 @@ from app.agents.nodes.interview_planner import get_plan_item_for_question
 from app.agents.nodes.report_generator import fallback_report, generate_report, report_content_is_incomplete
 from app.models.interview import InterviewMessage, InterviewSession
 from app.models.report import InterviewReport
-from app.schemas.report import InterviewReportRead
+from app.schemas.question_review import QuestionReviewRead
+from app.schemas.report import InterviewReportListItem, InterviewReportRead
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.citation_service import citations_from_json, citations_to_json, merge_citations
 from app.services.question_review_service import ensure_question_reviews
 from app.services.score_service import list_scores
+
+
+async def get_owned_report_question_reviews(
+    db: AsyncSession,
+    *,
+    report_id: int,
+    user_id: int,
+) -> list[QuestionReviewRead]:
+    """校验最终报告归属后返回稳定的逐题复盘快照。"""
+    result = (
+        await db.execute(_owned_final_report_query(report_id, user_id))
+    ).first()
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    report, _session = result
+    reviews = await ensure_question_reviews(db, report)
+    await db.commit()
+    return reviews
+
+
+async def list_owned_reports(
+    db: AsyncSession,
+    user_id: int,
+) -> list[InterviewReportListItem]:
+    """按生成时间倒序返回用户已完成正式面试的最终报告。"""
+    rows = await db.execute(
+        select(InterviewReport, InterviewSession)
+        .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
+        .where(
+            InterviewSession.user_id == user_id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+            InterviewReport.is_final.is_(True),
+        )
+        .order_by(InterviewReport.created_at.desc())
+    )
+    return [
+        InterviewReportListItem(
+            id=report.id,
+            session_id=report.session_id,
+            target_position=session.target_position,
+            difficulty=session.difficulty,
+            total_score=report.total_score,
+            created_at=report.created_at,
+            updated_at=report.updated_at,
+        )
+        for report, session in rows.all()
+    ]
+
+
+async def get_owned_report(
+    db: AsyncSession,
+    *,
+    report_id: int,
+    user_id: int,
+) -> InterviewReportRead:
+    """读取最终报告，修复旧的不完整数据并记录查看事件。"""
+    result = (
+        await db.execute(_owned_final_report_query(report_id, user_id))
+    ).first()
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    report, session = result
+    if await repair_report_if_incomplete(db, report, session):
+        await db.flush()
+    await ensure_question_reviews(db, report)
+    await record_analytics_event_safely(
+        db,
+        event_name="report_viewed",
+        user_id=user_id,
+        session_id=session.id,
+        report_id=report.id,
+        deduplication_key=f"report_viewed:{user_id}:{report.id}",
+    )
+    await db.commit()
+    return report_to_read(report)
+
+
+def _owned_final_report_query(report_id: int, user_id: int):
+    """构造最终报告归属查询，供详情与逐题复盘共享同一套边界。"""
+    return (
+        select(InterviewReport, InterviewSession)
+        .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
+        .where(
+            InterviewReport.id == report_id,
+            InterviewReport.is_final.is_(True),
+            InterviewSession.user_id == user_id,
+            InterviewSession.status == "finished",
+            InterviewSession.session_purpose == "full_interview",
+        )
+    )
 
 
 async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewReportRead:

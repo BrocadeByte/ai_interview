@@ -2,9 +2,25 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.job_description import JobDescription
+from app.models.profile import UserProfile
+from app.models.resume import Resume
 from app.schemas.job_description import ParsedJobDescription
-from app.schemas.profile import AutoProfileDraft, ProfileFieldSource, ProfileUpdate
+from app.schemas.profile import (
+    AutoProfileDraft,
+    AutoProfileGenerate,
+    ProfileFieldSource,
+    ProfileRead,
+    ProfileUpdate,
+)
 from app.schemas.resume import ParsedResume, ResumeProfilePatch
+from app.services.analytics_service import record_analytics_event_safely
+from app.services.job_description_service import load_parsed_job_description
+from app.services.resume_service import load_json_object
 
 
 PROFILE_COMPLETENESS_WEIGHTS = {
@@ -30,6 +46,146 @@ PROFILE_FIELD_LABELS = {
 LOW_COMPLETENESS_THRESHOLD = 70
 
 
+async def generate_auto_profile_draft(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    payload: AutoProfileGenerate,
+) -> AutoProfileDraft:
+    """汇总当前画像、简历和岗位快照，生成不直接落库的可确认草稿。"""
+    profile = await get_user_profile(db, user_id)
+    existing_profile = (
+        ProfileRead.model_validate(profile).model_dump(exclude={"id", "user_id"})
+        if profile
+        else None
+    )
+
+    resume_patch: ResumeProfilePatch | None = None
+    parsed_resume: ParsedResume | None = None
+    if payload.resume_id is not None:
+        resume = await get_owned_resume(db, payload.resume_id, user_id)
+        if resume.status != "parsed" or not resume.profile_patch_json:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Resume has no parsed profile draft",
+            )
+        try:
+            resume_patch = ResumeProfilePatch.model_validate(
+                load_json_object(resume.profile_patch_json)
+            )
+            parsed_data = load_json_object(resume.parsed_json)
+            parsed_resume = (
+                ParsedResume.model_validate(parsed_data) if parsed_data is not None else None
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Stored resume parsing result is invalid",
+            ) from exc
+
+    parsed_job_description: ParsedJobDescription | None = None
+    if payload.job_description_id is not None:
+        job_description = await get_owned_job_description(
+            db,
+            payload.job_description_id,
+            user_id,
+        )
+        if job_description.status != "parsed" or not job_description.parsed_json:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Job description has no parsed result",
+            )
+        try:
+            parsed_job_description = load_parsed_job_description(
+                job_description.parsed_json
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Stored job description parsing result is invalid",
+            ) from exc
+
+    draft = build_auto_profile_draft(
+        existing_profile=existing_profile,
+        resume_patch=resume_patch,
+        parsed_resume=parsed_resume,
+        parsed_job_description=parsed_job_description,
+        requested_target_position=payload.target_position,
+    )
+    await record_analytics_event_safely(
+        db,
+        event_name="profile_auto_generated",
+        user_id=user_id,
+        resume_id=payload.resume_id,
+        job_description_id=payload.job_description_id,
+        properties={"completeness": draft.completeness},
+    )
+    await db.commit()
+    return draft
+
+
+async def get_or_create_profile(db: AsyncSession, user_id: int) -> UserProfile:
+    """返回用户画像；首次访问时创建空画像。"""
+    profile = await get_user_profile(db, user_id)
+    if profile is None:
+        profile = UserProfile(user_id=user_id)
+        db.add(profile)
+        await db.commit()
+        await db.refresh(profile)
+    return profile
+
+
+async def update_user_profile(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    payload: ProfileUpdate,
+) -> UserProfile:
+    """只更新请求中显式提供的画像字段，并提交修改。"""
+    profile = await get_user_profile(db, user_id) or UserProfile(user_id=user_id)
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(profile, field, value)
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+    return profile
+
+
+async def get_user_profile(db: AsyncSession, user_id: int) -> UserProfile | None:
+    """按用户 ID 查询求职画像。"""
+    return await db.scalar(select(UserProfile).where(UserProfile.user_id == user_id))
+
+
+async def get_owned_resume(db: AsyncSession, resume_id: int, user_id: int) -> Resume:
+    """读取用户拥有的简历，隐藏其他用户记录的存在。"""
+    resume = await db.scalar(
+        select(Resume).where(Resume.id == resume_id, Resume.user_id == user_id)
+    )
+    if resume is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
+    return resume
+
+
+async def get_owned_job_description(
+    db: AsyncSession,
+    job_description_id: int,
+    user_id: int,
+) -> JobDescription:
+    """读取用户拥有的岗位描述，隐藏其他用户记录的存在。"""
+    job_description = await db.scalar(
+        select(JobDescription).where(
+            JobDescription.id == job_description_id,
+            JobDescription.user_id == user_id,
+        )
+    )
+    if job_description is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job description not found",
+        )
+    return job_description
+
+
 def build_auto_profile_draft(
     *,
     existing_profile: Mapping[str, Any] | None,
@@ -38,7 +194,7 @@ def build_auto_profile_draft(
     parsed_job_description: ParsedJobDescription | None,
     requested_target_position: str | None,
 ) -> AutoProfileDraft:
-    """Merge trusted structured snapshots into a reviewable draft without persisting it."""
+    """按明确优先级合并可信快照，生成可审核但不直接持久化的画像草稿。"""
     draft = ProfileUpdate.model_validate(dict(existing_profile or {}))
     values = draft.model_dump()
     sources: dict[str, ProfileFieldSource] = {
@@ -80,6 +236,7 @@ def build_auto_profile_draft(
 
 
 def calculate_profile_completeness(profile: ProfileUpdate) -> tuple[int, list[str]]:
+    """按核心字段权重计算画像完整度和缺失字段。"""
     values = profile.model_dump()
     score = sum(
         weight

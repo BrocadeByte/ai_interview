@@ -15,11 +15,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-import app.agents.nodes.answer_evaluator as answer_evaluator
 import app.agents.nodes.answer_pipeline as answer_pipeline
-import app.agents.nodes.followup_decider as followup_decider
 import app.agents.nodes.interview_planner as interview_planner
-import app.agents.nodes.question_generator as question_generator
 import app.agents.nodes.report_generator as report_generator
 import app.api.interviews as interviews_api
 import app.models  # noqa: F401
@@ -104,15 +101,6 @@ async def client(test_session_factory, monkeypatch):
     monkeypatch.setattr(interview_planner, "llm", FakeLLM([
         '{"question":"请介绍一个你做过的后端项目。","plan":[{"dimension":"项目经验","question_count":2,"weight":0.25,"focus":"考察项目职责和结果"},{"dimension":"专业基础","question_count":2,"weight":0.25,"focus":"考察 FastAPI 和数据库基础"},{"dimension":"系统设计","question_count":2,"weight":0.25,"focus":"考察接口、安全和扩展性"},{"dimension":"问题排查与协作","question_count":2,"weight":0.25,"focus":"考察排查和沟通"}]}'
     ]))
-    monkeypatch.setattr(question_generator, "llm", FakeLLM([
-        '{"question":"你如何处理接口鉴权和 token 过期？","dimension":"登录鉴权","reason":"继续考察后端能力"}',
-    ]))
-    monkeypatch.setattr(answer_evaluator, "llm", FakeLLM([
-        '{"score":82,"sub_scores":{"专业准确性":82,"表达清晰度":80,"项目真实性":85,"岗位匹配度":81},"reason":"回答包含关键实现。","weaknesses":["缺少指标"],"suggestions":["补充结果数据"]}'
-    ]))
-    monkeypatch.setattr(followup_decider, "llm", FakeLLM([
-        '{"needs_followup":false,"reason":"回答基本完整，可以进入下一题。","followup_question":""}'
-    ]))
     monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
         '{"needs_followup":false,"decision_reason":"回答基本完整，可以进入下一题。","question":"你如何处理接口鉴权和 token 过期？","score":82,"sub_scores":{"专业准确性":82,"表达清晰度":80,"项目真实性":85,"岗位匹配度":81},"reason":"回答包含关键实现。","weaknesses":["缺少指标"],"suggestions":["补充结果数据"]}'
     ]))
@@ -120,8 +108,6 @@ async def client(test_session_factory, monkeypatch):
         '{"total_score":82,"summary":"整体表现良好。","strengths":["项目表达清楚"],"weaknesses":["指标不足"],"suggestions":["补充量化结果"],"learning_path":["复习鉴权安全"],"sample_answer":"可以按背景、方案、结果组织回答。"}'
     ]))
     monkeypatch.setattr(interview_planner, "format_knowledge_context", AsyncKnowledgeContext("测试计划知识库"))
-    monkeypatch.setattr(question_generator, "format_knowledge_context", AsyncKnowledgeContext("测试知识库上下文"))
-    monkeypatch.setattr(answer_evaluator, "format_knowledge_context", AsyncKnowledgeContext("测试评分标准"))
     monkeypatch.setattr(answer_pipeline, "format_knowledge_context", AsyncKnowledgeContext("测试合并检索上下文"))
     monkeypatch.setattr(report_generator, "format_knowledge_context", AsyncKnowledgeContext("测试报告知识库"))
 
@@ -475,7 +461,7 @@ async def test_start_stream_emits_first_question_deltas(client: AsyncClient) -> 
     assert completed["status"] == "active"
     assert interview_planner.format_knowledge_context.calls == 1
     assert interview_planner.llm.calls == 1
-    assert question_generator.llm.calls == 0
+    assert answer_pipeline.llm.calls == 0
 
 @pytest.mark.anyio
 async def test_answer_stream_emits_deltas_before_complete(client: AsyncClient) -> None:
@@ -563,9 +549,6 @@ async def test_answer_returns_conflict_when_session_lease_is_occupied(client: As
 @pytest.mark.anyio
 async def test_answer_can_create_followup_without_advancing_question(client: AsyncClient, monkeypatch) -> None:
     headers = await register_and_fill_profile(client)
-    monkeypatch.setattr(followup_decider, "llm", FakeLLM([
-        '{"needs_followup":true,"reason":"回答缺少实现细节，需要继续追问。","followup_question":"你能具体说说 token 过期后如何处理吗？"}'
-    ]))
     monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
         '{"needs_followup":true,"decision_reason":"回答缺少实现细节，需要继续追问。","question":"你能具体说说 token 过期后如何处理吗？","score":70,"sub_scores":{"专业准确性":70,"表达清晰度":65,"项目真实性":60,"岗位匹配度":70},"reason":"回答过于简略。","weaknesses":["缺少细节"],"suggestions":["补充实现细节"]}'
     ]))

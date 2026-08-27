@@ -31,6 +31,34 @@ from app.schemas.analytics import (
 logger = logging.getLogger(__name__)
 
 
+async def record_client_event_and_commit(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    payload: ClientAnalyticsEventCreate,
+) -> None:
+    """记录只能由浏览器感知的交互事件，并提交去重后的结果。"""
+    await record_client_event(db, user_id=user_id, payload=payload)
+    await db.commit()
+
+
+async def build_metrics_for_period(
+    db: AsyncSession,
+    *,
+    period_start: date | None,
+    period_end: date | None,
+) -> AnalyticsMetricsRead:
+    """补齐默认 30 天统计区间并生成管理端指标。"""
+    today = datetime.utcnow().date()
+    resolved_end = period_end or today
+    resolved_start = period_start or (resolved_end - timedelta(days=29))
+    return await build_analytics_metrics(
+        db,
+        period_start=resolved_start,
+        period_end=resolved_end,
+    )
+
+
 async def record_analytics_event(
     db: AsyncSession,
     *,
@@ -46,6 +74,7 @@ async def record_analytics_event(
     properties: dict[str, Any] | None = None,
     occurred_at: datetime | None = None,
 ) -> None:
+    """写入带业务去重键的分析事件。"""
     """Insert an event without turning retries into duplicate rows."""
     values = {
         "event_name": event_name,

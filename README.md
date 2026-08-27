@@ -29,7 +29,7 @@ OPENAI_API_KEY=你的模型 API Key
 OPENAI_API_BASE=https://api.deepseek.com
 OPENAI_MODEL=deepseek-chat
 RESUME_PARSE_MODEL=
-RESUME_PARSE_TIMEOUT_SECONDS=35
+RESUME_PARSE_TIMEOUT_SECONDS=60
 RABBITMQ_URL=amqp://user:password@虚拟机IP:5672/
 QDRANT_URL=http://虚拟机IP:6333
 QDRANT_COLLECTION_NAME=knowledge_documents
@@ -92,8 +92,8 @@ python -m app.workers.resume_worker
 外部服务，分别由 `RABBITMQ_URL` 和 `QDRANT_URL` 指定。容器内不能把虚拟机服务
 写成 `127.0.0.1`；应使用容器网络可达的虚拟机 IP/主机名，并确保 5672/6333 端口
 及 RabbitMQ 用户权限已对应用容器开放。Resume Worker 不访问 Qdrant。AI 连接失败、
-限流和临时服务错误会自动重试一次；完整 35 秒解析超时会直接失败，避免超过前端
-约 40 秒的等待预算。
+限流和临时服务错误会自动重试一次；完整 60 秒解析超时会直接失败，避免超过前端
+约 70 秒的等待预算。
 
 后端接口地址为 `http://127.0.0.1:8000`。
 

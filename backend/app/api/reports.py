@@ -1,17 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+"""面试报告 HTTP 接口：注入用户与数据库后委托报告服务。"""
+
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
-from app.models.interview import InterviewSession
-from app.models.report import InterviewReport
 from app.models.user import User
 from app.schemas.question_review import QuestionReviewRead
 from app.schemas.report import InterviewReportListItem, InterviewReportRead
-from app.services.analytics_service import record_analytics_event_safely
-from app.services.question_review_service import ensure_question_reviews
-from app.services.report_service import repair_report_if_incomplete, report_to_read
+from app.services.report_service import (
+    get_owned_report,
+    get_owned_report_question_reviews,
+    list_owned_reports,
+)
 
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -23,26 +24,12 @@ async def get_report_question_reviews(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[QuestionReviewRead]:
-    """Return stable per-score review snapshots for a report owned by the user."""
-    row = await db.execute(
-        select(InterviewReport, InterviewSession)
-        .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(
-            InterviewReport.id == report_id,
-            InterviewReport.is_final.is_(True),
-            InterviewSession.user_id == current_user.id,
-            InterviewSession.status == "finished",
-            InterviewSession.session_purpose == "full_interview",
-        )
+    """返回当前用户最终报告对应的逐题复盘快照。"""
+    return await get_owned_report_question_reviews(
+        db,
+        report_id=report_id,
+        user_id=current_user.id,
     )
-    result = row.first()
-    if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-
-    report, _session = result
-    reviews = await ensure_question_reviews(db, report)
-    await db.commit()
-    return reviews
 
 
 # 获取当前登录用户的所有面试报告列表。
@@ -51,30 +38,8 @@ async def list_reports(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[InterviewReportListItem]:
-    rows = await db.execute(
-        select(InterviewReport, InterviewSession)
-        .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(
-            InterviewSession.user_id == current_user.id,
-            InterviewSession.status == "finished",
-            InterviewSession.session_purpose == "full_interview",
-            InterviewReport.is_final.is_(True),
-        )
-        .order_by(InterviewReport.created_at.desc())
-    )
-
-    return [
-        InterviewReportListItem(
-            id=report.id,
-            session_id=report.session_id,
-            target_position=session.target_position,
-            difficulty=session.difficulty,
-            total_score=report.total_score,
-            created_at=report.created_at,
-            updated_at=report.updated_at,
-        )
-        for report, session in rows.all()
-    ]
+    """返回当前用户的最终面试报告列表。"""
+    return await list_owned_reports(db, current_user.id)
 
 
 # 获取指定报告详情，并校验报告归属当前用户。
@@ -84,32 +49,9 @@ async def get_report(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewReportRead:
-    row = await db.execute(
-        select(InterviewReport, InterviewSession)
-        .join(InterviewSession, InterviewReport.session_id == InterviewSession.id)
-        .where(
-            InterviewReport.id == report_id,
-            InterviewReport.is_final.is_(True),
-            InterviewSession.user_id == current_user.id,
-            InterviewSession.status == "finished",
-            InterviewSession.session_purpose == "full_interview",
-        )
-    )
-    result = row.first()
-    if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-
-    report, session = result
-    if await repair_report_if_incomplete(db, report, session):
-        await db.flush()
-    await ensure_question_reviews(db, report)
-    await record_analytics_event_safely(
+    """返回当前用户拥有的报告详情并记录查看事件。"""
+    return await get_owned_report(
         db,
-        event_name="report_viewed",
         user_id=current_user.id,
-        session_id=session.id,
-        report_id=report.id,
-        deduplication_key=f"report_viewed:{current_user.id}:{report.id}",
+        report_id=report_id,
     )
-    await db.commit()
-    return report_to_read(report)

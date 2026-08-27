@@ -1,3 +1,9 @@
+"""面试 HTTP 接口。
+
+路由层只负责请求参数、鉴权依赖、状态码和 SSE 传输；会话查询、事务和 Agent
+状态推进统一委托给 ``interview_service``。
+"""
+
 import asyncio
 import json
 import logging
@@ -7,27 +13,26 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from starlette.background import BackgroundTask
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import selectinload
+from starlette.background import BackgroundTask
 
-from app.agents.graph import interview_graph
-from app.agents.nodes.interview_planner import get_interview_question_count, get_plan_item_for_question
+from app.agents.graph import interview_graph  # 保留导出，兼容现有测试与调试脚本。
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.interview import InterviewMessage, InterviewSession
-from app.models.job_description import JobDescription
 from app.models.profile import UserProfile
-from app.models.report import InterviewReport
-from app.models.resume import Resume
 from app.models.user import User
-from app.schemas.interview import InterviewAnswer, InterviewCreate, InterviewListItem, InterviewSessionRead, InterviewWarmup
-from app.schemas.llm_outputs import VisibleQuestionOutput
+from app.schemas.interview import (
+    InterviewAnswer,
+    InterviewCreate,
+    InterviewListItem,
+    InterviewSessionRead,
+    InterviewWarmup,
+)
 from app.schemas.question_review import QuestionReviewRead
 from app.schemas.report import InterviewReportRead
 from app.schemas.score import InterviewScoreRead
-from app.services.analytics_service import record_analytics_event_safely
+from app.services import interview_service
 from app.services.interview_answer_service import (
     SessionLeaseHeartbeat,
     SessionLeaseLostError,
@@ -35,23 +40,14 @@ from app.services.interview_answer_service import (
     find_completed_answer_request,
     release_answer_lease,
 )
-from app.services.interview_state_service import build_state_from_session
-from app.services.job_description_service import build_job_description_snapshot
-from app.services.resume_service import build_resume_snapshot
 from app.services.interview_memory_service import maybe_compact_medium_term_memory
-from app.services.report_service import get_or_create_report, is_final_report_session
 from app.services.llm_stream import (
+    publish_committed_text,
     reset_stream_delta_callback,
     reset_stream_text_done_callback,
-    publish_committed_text,
     set_stream_delta_callback,
     set_stream_text_done_callback,
 )
-from app.services.question_review_service import ensure_question_reviews
-from app.services.practice_service import attach_practice_fields, sync_practice_for_interview
-from app.services.score_service import list_scores, save_latest_score
-from app.rag.embeddings import embed_text
-from app.rag.retriever import ensure_collection
 
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
@@ -59,17 +55,13 @@ logger = logging.getLogger(__name__)
 
 
 def _planner_knowledge_query(target_position: str) -> str:
-    return f"{target_position.strip()} 面试计划 岗位能力模型 评分标准"
+    """构造岗位相关的预热查询；保留此入口便于独立调试。"""
+    return interview_service.planner_knowledge_query(target_position)
 
 
 async def _warmup_interview_dependencies(target_position: str) -> None:
-    try:
-        await asyncio.gather(
-            ensure_collection(),
-            embed_text(_planner_knowledge_query(target_position)),
-        )
-    except Exception as exc:
-        logger.warning("interview.warmup.failed target_position=%r error=%r", target_position, exc)
+    """后台预热面试依赖，预热失败不会阻断用户创建面试。"""
+    await interview_service.warmup_interview_dependencies(target_position)
 
 
 @router.post("/warmup", status_code=status.HTTP_204_NO_CONTENT)
@@ -78,7 +70,7 @@ async def warmup_interview(
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ) -> None:
-    """Schedule target-specific warmup while the user is filling the form."""
+    """用户填写表单时异步预热目标岗位所需的检索资源。"""
     del current_user
     background_tasks.add_task(_warmup_interview_dependencies, payload.target_position)
 
@@ -89,98 +81,12 @@ async def create_interview(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewSession:
-    """创建待启动会话，并冻结用户选中的简历与 JD 快照。"""
-    resume = None
-    if payload.resume_id is not None:
-        resume = await db.scalar(
-            select(Resume).where(Resume.id == payload.resume_id, Resume.user_id == current_user.id)
-        )
-        if resume is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
-        if resume.status != "parsed":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Only a parsed resume can be used for an interview",
-            )
-
-    job_description = None
-    if payload.job_description_id is not None:
-        job_description = await db.scalar(
-            select(JobDescription).where(
-                JobDescription.id == payload.job_description_id,
-                JobDescription.user_id == current_user.id,
-            )
-        )
-        if job_description is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job description not found")
-        if job_description.status != "parsed":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Only a parsed job description can be used for an interview",
-            )
-
-    if payload.parent_session_id is not None:
-        parent_exists = await db.scalar(
-            select(InterviewSession.id).where(
-                InterviewSession.id == payload.parent_session_id,
-                InterviewSession.user_id == current_user.id,
-            )
-        )
-        if parent_exists is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent interview not found")
-
-    if payload.source_report_id is not None:
-        source_report_exists = await db.scalar(
-            select(InterviewReport.id)
-            .join(InterviewSession, InterviewSession.id == InterviewReport.session_id)
-            .where(
-                InterviewReport.id == payload.source_report_id,
-                InterviewReport.is_final.is_(True),
-                InterviewSession.user_id == current_user.id,
-                InterviewSession.status == "finished",
-                InterviewSession.session_purpose == "full_interview",
-            )
-        )
-        if source_report_exists is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source report not found")
-
-    session = InterviewSession(
-        user_id=current_user.id,
-        target_position=payload.target_position,
-        difficulty=payload.difficulty,
-        mode=payload.mode,
-        interview_type=payload.interview_type,
-        status="preparing",
-        resume_id=resume.id if resume else None,
-        resume_snapshot_json=build_resume_snapshot(resume) if resume else None,
-        job_description_id=job_description.id if job_description else None,
-        job_description_snapshot_json=(
-            build_job_description_snapshot(job_description) if job_description else None
-        ),
-        parent_session_id=payload.parent_session_id,
-        source_report_id=payload.source_report_id,
-        source_weakness_key=payload.source_weakness_key,
-        session_purpose=payload.session_purpose,
-        comparison_group_id=payload.comparison_group_id,
-    )
-    db.add(session)
-    await db.flush()
-    await record_analytics_event_safely(
+    """接收创建请求，业务校验和持久化由 Service 完成。"""
+    return await interview_service.create_interview_session(
         db,
-        event_name="interview_created",
         user_id=current_user.id,
-        session_id=session.id,
-        resume_id=session.resume_id,
-        job_description_id=session.job_description_id,
-        deduplication_key=f"interview_created:{session.id}",
-        properties={
-            "mode": session.mode,
-            "interview_type": session.interview_type,
-            "session_purpose": session.session_purpose,
-        },
+        payload=payload,
     )
-    await db.commit()
-    return await _load_session(db, current_user.id, session.id)
 
 
 @router.post("/{session_id}/start", response_model=InterviewSessionRead)
@@ -189,16 +95,15 @@ async def start_interview(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewSession:
-    """启动面试并持久化计划和首题；已有消息时直接返回，避免重复生成首题。"""
+    """非流式启动面试；重复请求直接返回已经生成的首题。"""
     session = await _load_session(db, current_user.id, session_id)
     if session.status == "finished":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview is already finished")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Interview is already finished",
+        )
     if session.messages:
-        if session.status == "preparing":
-            session.status = "active"
-        await _record_interview_started(db, session)
-        await db.commit()
-        return await _load_session(db, current_user.id, session.id)
+        return await interview_service.resume_started_session(db, session)
 
     start_request_id = str(uuid4())
     acquired = await acquire_answer_lease(
@@ -239,20 +144,15 @@ async def start_interview_stream(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """以 SSE 启动面试，边生成首题边推送草稿，提交后确认权威文本。
-
-    流式生成使用独立数据库会话，避免 FastAPI 请求依赖在响应迭代期间被提前关闭；
-    客户端断开时会取消后台任务并回滚尚未提交的计划和消息。
-    """
+    """以 SSE 启动面试，先推送模型草稿，提交后再确认权威首题文本。"""
     session = await _load_session(db, current_user.id, session_id)
     if session.status == "finished":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview is already finished")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Interview is already finished",
+        )
     if session.messages:
-        if session.status == "preparing":
-            session.status = "active"
-        await _record_interview_started(db, session)
-        await db.commit()
-        loaded = await _load_session(db, current_user.id, session.id)
+        loaded = await interview_service.resume_started_session(db, session)
         return _sse_response(_completed_session_stream(loaded))
 
     start_request_id = str(uuid4())
@@ -269,12 +169,14 @@ async def start_interview_stream(
             detail="Interview start is already being processed",
         )
 
+    # 流式响应可能晚于请求依赖释放，因此使用独立数据库会话处理整段生成过程。
     stream_session_factory = async_sessionmaker(bind=db.bind, expire_on_commit=False)
     await db.close()
 
     async def event_stream() -> AsyncIterator[str]:
         queue: asyncio.Queue[str] = asyncio.Queue()
         async with stream_session_factory() as stream_db:
+
             async def emit_delta(delta: str) -> None:
                 await queue.put(_sse_event("draft_delta", {"content": delta}))
 
@@ -306,17 +208,8 @@ async def start_interview_stream(
             task = asyncio.create_task(process())
             yield _sse_event("status", {"phase": "retrieving"})
             try:
-                while not task.done():
-                    if await request.is_disconnected():
-                        task.cancel()
-                        break
-                    try:
-                        yield await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
-                        yield ": keep-alive\n\n"
-
-                while not queue.empty():
-                    yield queue.get_nowait()
+                async for event in _forward_stream_events(request, queue, task):
+                    yield event
                 result = await task
                 yield _sse_event("complete", _serialize_session(result))
             except asyncio.CancelledError:
@@ -340,38 +233,38 @@ async def start_interview_stream(
         ),
     )
 
+
 @router.get("", response_model=list[InterviewListItem])
 async def list_interviews(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[InterviewSession]:
-    result = await db.scalars(
-        select(InterviewSession)
-        .where(InterviewSession.user_id == current_user.id)
-        .order_by(InterviewSession.updated_at.desc())
-    )
-    return list(result)
+    """返回当前用户的面试列表。"""
+    return await interview_service.list_interview_sessions(db, current_user.id)
 
 
-# 获取指定面试的完整信息。
 @router.get("/{session_id}", response_model=InterviewSessionRead)
 async def get_interview(
     session_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewSession:
+    """返回指定面试的完整状态和消息。"""
     return await _load_session(db, current_user.id, session_id)
 
 
-# 获取指定面试的各项评分。
 @router.get("/{session_id}/scores", response_model=list[InterviewScoreRead])
 async def get_interview_scores(
     session_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[InterviewScoreRead]:
-    await _load_session(db, current_user.id, session_id)
-    return await list_scores(db, session_id)
+    """返回指定面试的逐题评分。"""
+    return await interview_service.get_interview_scores(
+        db,
+        user_id=current_user.id,
+        session_id=session_id,
+    )
 
 
 @router.get("/{session_id}/question-reviews", response_model=list[QuestionReviewRead])
@@ -380,47 +273,28 @@ async def get_interview_question_reviews(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[QuestionReviewRead]:
-    """Generate the report if needed, then return its stable per-score reviews."""
-    session = await _load_session(db, current_user.id, session_id)
-    if not is_final_report_session(session):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Question reviews are available after the full interview is finished",
-        )
-    report_read = await get_or_create_report(db, session_id)
-    if report_read.id is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Final report is not available")
-    report = await db.get(InterviewReport, report_read.id)
-    if report is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-    reviews = await ensure_question_reviews(db, report)
-    await db.commit()
-    return reviews
+    """返回正式面试报告对应的逐题复盘快照。"""
+    return await interview_service.get_interview_question_reviews(
+        db,
+        user_id=current_user.id,
+        session_id=session_id,
+    )
 
 
-# 获取或生成指定面试的报告。
 @router.get("/{session_id}/report", response_model=InterviewReportRead)
 async def get_interview_report(
     session_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewReportRead:
-    await _load_session(db, current_user.id, session_id)
-    report = await get_or_create_report(db, session_id)
-    if report.id is not None and report.is_final:
-        await record_analytics_event_safely(
-            db,
-            event_name="report_viewed",
-            user_id=current_user.id,
-            session_id=session_id,
-            report_id=report.id,
-            deduplication_key=f"report_viewed:{current_user.id}:{report.id}",
-        )
-    await db.commit()
-    return report
+    """获取或生成指定面试的报告。"""
+    return await interview_service.get_interview_report(
+        db,
+        user_id=current_user.id,
+        session_id=session_id,
+    )
 
 
-# 提交回答并生成追问或下一道问题。
 @router.post("/{session_id}/answer", response_model=InterviewSessionRead)
 async def answer_interview(
     session_id: int,
@@ -428,7 +302,7 @@ async def answer_interview(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> InterviewSession:
-    """处理非流式回答；request_id 保证重试幂等，会话租约阻止并发回答串线。"""
+    """处理非流式回答；request_id 保证重试幂等，租约阻止并发串线。"""
     request_id = str(payload.request_id)
     session = await _load_session(db, current_user.id, session_id)
     completed_request = await find_completed_answer_request(
@@ -438,10 +312,7 @@ async def answer_interview(
     )
     if completed_request:
         return session
-    if session.status == "preparing":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview is still preparing")
-    if session.status != "active":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview is not active")
+    _ensure_answerable(session)
 
     acquired = await acquire_answer_lease(
         db,
@@ -450,6 +321,7 @@ async def answer_interview(
         request_id=request_id,
     )
     if not acquired:
+        # 获取租约失败后再查一次幂等结果，覆盖并发请求刚好完成的竞态窗口。
         completed_request = await find_completed_answer_request(
             db,
             session_id=session_id,
@@ -464,7 +336,13 @@ async def answer_interview(
 
     try:
         session = await _load_session(db, current_user.id, session_id)
-        return await _process_answer(db, session, current_user, payload.answer, request_id)
+        return await _process_answer(
+            db,
+            session,
+            current_user,
+            payload.answer,
+            request_id,
+        )
     except Exception:
         await db.rollback()
         await release_answer_lease(db, session_id=session_id, request_id=request_id)
@@ -479,12 +357,7 @@ async def answer_interview_stream(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """处理流式回答，在同一租约内完成评分、路由、消息保存并推送下一问题。
-
-    `draft_delta` 只代表模型草稿，`text_done` 是提交后的权威文本，`complete` 携带
-    已提交的会话状态。异常或断连会回滚事务并释放租约，使客户端可复用原
-    request_id 安全重试。
-    """
+    """以 SSE 处理回答，并依次推送草稿、权威文本和已提交的会话状态。"""
     request_id = str(payload.request_id)
     session = await _load_session(db, current_user.id, session_id)
     completed_request = await find_completed_answer_request(
@@ -494,10 +367,7 @@ async def answer_interview_stream(
     )
     if completed_request:
         return _sse_response(_completed_session_stream(session))
-    if session.status == "preparing":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview is still preparing")
-    if session.status != "active":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Interview is not active")
+    _ensure_answerable(session)
 
     acquired = await acquire_answer_lease(
         db,
@@ -517,6 +387,7 @@ async def answer_interview_stream(
     async def event_stream() -> AsyncIterator[str]:
         queue: asyncio.Queue[str] = asyncio.Queue()
         async with stream_session_factory() as stream_db:
+
             async def emit_delta(delta: str) -> None:
                 await queue.put(_sse_event("draft_delta", {"content": delta}))
 
@@ -544,18 +415,8 @@ async def answer_interview_stream(
             task = asyncio.create_task(process())
             yield _sse_event("status", {"phase": "evaluating"})
             try:
-                while not task.done():
-                    if await request.is_disconnected():
-                        task.cancel()
-                        break
-                    try:
-                        yield await asyncio.wait_for(queue.get(), timeout=15)
-                    except asyncio.TimeoutError:
-                        yield ": keep-alive\n\n"
-
-                while not queue.empty():
-                    yield queue.get_nowait()
-
+                async for event in _forward_stream_events(request, queue, task):
+                    yield event
                 result = await task
                 yield _sse_event("complete", _serialize_session(result))
             except asyncio.CancelledError:
@@ -563,15 +424,38 @@ async def answer_interview_stream(
                 with suppress(asyncio.CancelledError):
                     await task
                 await stream_db.rollback()
-                await release_answer_lease(stream_db, session_id=session_id, request_id=request_id)
+                await release_answer_lease(
+                    stream_db,
+                    session_id=session_id,
+                    request_id=request_id,
+                )
                 raise
             except Exception as exc:
                 await stream_db.rollback()
-                await release_answer_lease(stream_db, session_id=session_id, request_id=request_id)
+                await release_answer_lease(
+                    stream_db,
+                    session_id=session_id,
+                    request_id=request_id,
+                )
                 logger.exception("interview.answer.stream.failed session_id=%s", session_id)
                 yield _sse_event("error", {"message": str(exc) or "Streaming answer failed"})
 
     return _sse_response(event_stream())
+
+
+@router.post("/{session_id}/finish", response_model=InterviewSessionRead)
+async def finish_interview(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> InterviewSession:
+    """主动结束面试；Service 使用回答租约保证结束操作与评分互斥。"""
+    return await interview_service.finish_interview_session(
+        db,
+        user_id=current_user.id,
+        session_id=session_id,
+        request_id=str(uuid4()),
+    )
 
 
 async def _process_answer(
@@ -581,180 +465,16 @@ async def _process_answer(
     answer: str,
     request_id: str,
 ) -> InterviewSession:
-    """执行一轮回答的核心事务：保存回答、运行面试图、落分并推进会话状态。
-
-    追问仍归属当前主问题；只有不追问时才推进主问题序号。租约释放与本轮消息、
-    评分在同一次提交中完成，保证客户端看到的完成状态与数据库一致。
-    """
-    existing_followups = sum(
-        1
-        for message in session.messages
-        if message.role == "assistant"
-        and message.question_index == session.current_question_index
-        and bool(message.is_followup)
-    )
-
-    current_plan_item = get_plan_item_for_question(
-        parse_interview_plan(session.interview_plan_json),
-        session.current_question_index,
-    )
-    current_dimension = next(
-        (
-            message.dimension
-            for message in reversed(session.messages)
-            if message.role == "assistant"
-            and message.question_index == session.current_question_index
-            and message.dimension
-        ),
-        current_plan_item["dimension"],
-    )
-
-    db.add(
-        InterviewMessage(
-            session_id=session.id,
-            role="user",
-            content=answer,
-            request_id=request_id,
-            question_index=session.current_question_index,
-            dimension=current_dimension,
-            is_followup=1 if existing_followups > 0 else 0,
-            followup_index=existing_followups,
-        )
-    )
-    await db.flush()
-
-    session = await _load_session(db, current_user.id, session.id)
-    # 历史上下文超阈值时，先把较早消息压缩进中期记忆，再构造图状态。
-    await maybe_compact_medium_term_memory(db, session)
-    session = await _load_session(db, current_user.id, session.id)
-    profile = await _get_profile(db, current_user.id)
-    state = build_state_from_session(session, profile)
-    state["action"] = "answer"
-    result = await interview_graph.ainvoke(state)
-
-    latest_score = await save_latest_score(db, session.id, result["scores"])
-
-    is_followup = 0
-    followup_index = 0
-    message_question_index = session.current_question_index
-
-    if result["followup_decision"] and result["followup_decision"]["needs_followup"]:
-        is_followup = 1
-        followup_index = result["follow_up_count"]
-    else:
-        if result["status"] == "finished":
-            session.status = "finished"
-        else:
-            session.current_question_index += 1
-            message_question_index = session.current_question_index
-
-    question = _validated_visible_question(result["current_question"])
-    if _is_duplicate_question(question, session.messages):
-        total_question_count = get_interview_question_count(parse_interview_plan(session.interview_plan_json))
-        if is_followup and session.current_question_index >= total_question_count:
-            session.status = "finished"
-            question = _validated_visible_question("本次模拟面试已完成。可以查看评分与复盘报告。")
-        else:
-            if is_followup:
-                session.current_question_index += 1
-                message_question_index = session.current_question_index
-            next_plan_item = get_plan_item_for_question(
-                parse_interview_plan(session.interview_plan_json),
-                message_question_index,
-            )
-            question = _validated_visible_question(
-                f"请围绕{next_plan_item['dimension']}，结合一个尚未讨论的具体经历说明你的做法、取舍和结果。"
-            )
-        is_followup = 0
-        followup_index = 0
-
-    db.add(
-        InterviewMessage(
-            session_id=session.id,
-            role="assistant",
-            content=question,
-            question_index=message_question_index,
-            dimension=result.get("current_dimension") or current_dimension,
-            is_followup=is_followup,
-            followup_index=followup_index,
-        )
-    )
-    await sync_practice_for_interview(db, session)
-    if session.status == "finished":
-        await _record_interview_finished(db, session)
-    await release_answer_lease(
+    """兼容入口：把 API 当前注入的依赖传给面试业务服务。"""
+    return await interview_service.process_answer(
         db,
-        session_id=session.id,
-        request_id=request_id,
-        commit=False,
-        require_held=True,
-    )
-    await db.commit()
-    return await _load_session(db, current_user.id, session.id)
-
-
-@router.post("/{session_id}/finish", response_model=InterviewSessionRead)
-async def finish_interview(
-    session_id: int,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> InterviewSession:
-    """主动结束面试，并复用回答租约与提交回答互斥，避免终止和评分并发写入。"""
-    session = await _load_session(db, current_user.id, session_id)
-    if session.status == "finished":
-        await _record_interview_finished(db, session)
-        await db.commit()
-        return session
-
-    finish_request_id = str(uuid4())
-    acquired = await acquire_answer_lease(
-        db,
-        session_id=session_id,
+        session,
         user_id=current_user.id,
-        request_id=finish_request_id,
-        allowed_statuses=("preparing", "active"),
+        answer=answer,
+        request_id=request_id,
+        compact_memory=maybe_compact_medium_term_memory,
     )
-    if not acquired:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An answer is being processed; try finishing again shortly",
-        )
 
-    try:
-        session = await _load_session(db, current_user.id, session_id)
-        profile = await _get_profile(db, current_user.id)
-        state = build_state_from_session(session, profile)
-        state["action"] = "finish"
-        result = await interview_graph.ainvoke(state)
-
-        session.status = result["status"]
-        question = _validated_visible_question(result["current_question"])
-        db.add(
-            InterviewMessage(
-                session_id=session.id,
-                role="assistant",
-                content=question,
-                question_index=session.current_question_index,
-                dimension=result.get("current_dimension"),
-                is_followup=0,
-                followup_index=0,
-            )
-        )
-        await sync_practice_for_interview(db, session)
-        await _record_interview_finished(db, session)
-        await release_answer_lease(
-            db,
-            session_id=session.id,
-            request_id=finish_request_id,
-            commit=False,
-            require_held=True,
-        )
-        await db.commit()
-        return await _load_session(db, current_user.id, session.id)
-    except Exception:
-        await db.rollback()
-        await release_answer_lease(db, session_id=session_id, request_id=finish_request_id)
-        raise
 
 async def _process_start(
     db: AsyncSession,
@@ -763,159 +483,90 @@ async def _process_start(
     request_id: str,
     heartbeat: SessionLeaseHeartbeat,
 ) -> InterviewSession:
-    """Generate and commit the first question behind a renewable, fenced session lease."""
-    heartbeat.start()
-    try:
-        session = await _load_session(db, current_user.id, session_id)
-        profile = await _get_profile(db, current_user.id)
-        state = build_state_from_session(session, profile, messages=[])
-        state["action"] = "start"
-        result = await interview_graph.ainvoke(state)
-        session.interview_plan_json = json.dumps(result.get("interview_plan") or [], ensure_ascii=False)
-        session.status = "active"
-        await sync_practice_for_interview(db, session)
-        await _record_interview_started(db, session)
-        question = _validated_visible_question(result["current_question"])
-        db.add(
-            InterviewMessage(
-                session_id=session.id,
-                role="assistant",
-                content=question,
-                question_index=session.current_question_index,
-                dimension=result.get("current_dimension"),
-                is_followup=0,
-                followup_index=0,
-            )
-        )
-
-        await heartbeat.stop()
-        if heartbeat.lost:
-            raise SessionLeaseLostError("Interview session lease ownership was lost")
-        await release_answer_lease(
-            db,
-            session_id=session_id,
-            request_id=request_id,
-            commit=False,
-            require_held=True,
-        )
-        await db.commit()
-        return await _load_session(db, current_user.id, session_id)
-    except BaseException:
-        await heartbeat.stop()
-        await db.rollback()
-        await release_answer_lease(db, session_id=session_id, request_id=request_id)
-        raise
-
-
-async def _load_session(db: AsyncSession, user_id: int, session_id: int) -> InterviewSession:
-    """加载当前用户拥有的会话及消息、记忆，并挂载响应所需的当前计划字段。"""
-    session = await db.scalar(
-        select(InterviewSession)
-        .options(selectinload(InterviewSession.messages), selectinload(InterviewSession.memories))
-        .where(InterviewSession.id == session_id, InterviewSession.user_id == user_id)
-        .execution_options(populate_existing=True)
+    """兼容入口：在 Service 中完成首题生成事务。"""
+    return await interview_service.process_start(
+        db,
+        user_id=current_user.id,
+        session_id=session_id,
+        request_id=request_id,
+        heartbeat=heartbeat,
     )
-    if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview not found")
-    attach_current_plan_fields(session)
-    await attach_practice_fields(db, session)
-    return session
+
+
+async def _load_session(
+    db: AsyncSession,
+    user_id: int,
+    session_id: int,
+) -> InterviewSession:
+    """兼容入口：加载当前用户拥有的面试会话。"""
+    return await interview_service.load_interview_session(db, user_id, session_id)
 
 
 async def _record_interview_started(db: AsyncSession, session: InterviewSession) -> None:
-    await record_analytics_event_safely(
-        db,
-        event_name="interview_started",
-        user_id=session.user_id,
-        session_id=session.id,
-        report_id=session.source_report_id,
-        practice_id=getattr(session, "practice_id", None),
-        deduplication_key=f"interview_started:{session.id}",
-        properties={
-            "mode": session.mode,
-            "interview_type": session.interview_type,
-            "session_purpose": session.session_purpose,
-        },
-    )
+    """兼容入口：记录面试开始事件。"""
+    await interview_service.record_interview_started(db, session)
 
 
 async def _record_interview_finished(db: AsyncSession, session: InterviewSession) -> None:
-    if session.status != "finished":
-        return
-    practice_id = getattr(session, "practice_id", None)
-    await record_analytics_event_safely(
-        db,
-        event_name="interview_finished",
-        user_id=session.user_id,
-        session_id=session.id,
-        report_id=session.source_report_id,
-        practice_id=practice_id,
-        deduplication_key=f"interview_finished:{session.id}",
-        properties={"session_purpose": session.session_purpose},
-    )
-    if session.session_purpose == "weakness_practice":
-        await record_analytics_event_safely(
-            db,
-            event_name="practice_finished",
-            user_id=session.user_id,
-            session_id=session.id,
-            report_id=session.source_report_id,
-            practice_id=practice_id,
-            deduplication_key=f"practice_finished:{session.id}",
-        )
-    elif session.session_purpose == "retest":
-        await record_analytics_event_safely(
-            db,
-            event_name="retest_finished",
-            user_id=session.user_id,
-            session_id=session.id,
-            report_id=session.source_report_id,
-            practice_id=practice_id,
-            deduplication_key=f"retest_finished:{session.id}",
-        )
+    """兼容入口：记录面试结束事件。"""
+    await interview_service.record_interview_finished(db, session)
 
 
-# 查询用户的求职画像。
 async def _get_profile(db: AsyncSession, user_id: int) -> UserProfile | None:
-    return await db.scalar(select(UserProfile).where(UserProfile.user_id == user_id))
+    """兼容入口：读取用户画像。"""
+    return await interview_service.get_user_profile(db, user_id)
 
 
-# 将面试计划 JSON 解析为列表。
 def parse_interview_plan(plan_json: str | None) -> list[dict]:
-    try:
-        plan = json.loads(plan_json or "[]")
-    except json.JSONDecodeError:
-        return []
-    return plan if isinstance(plan, list) else []
+    """兼容入口：安全解析面试计划 JSON。"""
+    return interview_service.parse_interview_plan(plan_json)
 
 
-# 补充当前问题对应的计划字段。
 def attach_current_plan_fields(session: InterviewSession) -> None:
-    """根据持久化计划计算只用于接口响应的当前维度、重点和总题数。"""
-    try:
-        plan = json.loads(session.interview_plan_json or "[]")
-    except json.JSONDecodeError:
-        plan = []
-    plan_item = get_plan_item_for_question(plan if isinstance(plan, list) else [], session.current_question_index)
-    setattr(session, "current_dimension", plan_item.get("dimension"))
-    setattr(session, "current_plan_focus", plan_item.get("focus"))
-    setattr(
-        session,
-        "total_question_count",
-        get_interview_question_count(plan if isinstance(plan, list) else []),
-    )
+    """兼容入口：补充会话响应所需的当前计划字段。"""
+    interview_service.attach_current_plan_fields(session)
 
 
 def _validated_visible_question(value: object) -> str:
-    return VisibleQuestionOutput.model_validate({"question": value}).question
+    return interview_service.validated_visible_question(value)
 
 
 def _is_duplicate_question(question: str, messages: list[InterviewMessage]) -> bool:
-    normalized = "".join(question.split()).casefold()
-    return any(
-        message.role == "assistant" and "".join(message.content.split()).casefold() == normalized
-        for message in messages
-    )
+    return interview_service.is_duplicate_question(question, messages)
+
+
+def _ensure_answerable(session: InterviewSession) -> None:
+    """把会话状态转换为稳定的 HTTP 错误，避免两种回答接口重复判断。"""
+    if session.status == "preparing":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Interview is still preparing",
+        )
+    if session.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Interview is not active",
+        )
+
+
+async def _forward_stream_events(
+    request: Request,
+    queue: asyncio.Queue[str],
+    task: asyncio.Task[InterviewSession],
+) -> AsyncIterator[str]:
+    """转发模型增量；空闲时发送心跳，客户端断开时取消后台任务。"""
+    while not task.done():
+        if await request.is_disconnected():
+            task.cancel()
+            break
+        try:
+            yield await asyncio.wait_for(queue.get(), timeout=15)
+        except asyncio.TimeoutError:
+            yield ": keep-alive\n\n"
+
+    # 任务结束与队列写入可能几乎同时发生，完成前必须排空剩余增量。
+    while not queue.empty():
+        yield queue.get_nowait()
 
 
 def _sse_response(
@@ -923,7 +574,7 @@ def _sse_response(
     *,
     background: BackgroundTask | None = None,
 ) -> StreamingResponse:
-    """创建禁用代理缓冲的 SSE 响应，确保模型增量能及时到达浏览器。"""
+    """创建禁用代理缓冲的 SSE 响应，确保增量及时到达浏览器。"""
     return StreamingResponse(
         events,
         media_type="text/event-stream",
@@ -941,6 +592,7 @@ async def _release_stream_lease(
     session_id: int,
     request_id: str,
 ) -> None:
+    """流式响应结束后使用独立会话兜底释放租约。"""
     async with session_factory() as db:
         await release_answer_lease(db, session_id=session_id, request_id=request_id)
 
@@ -952,8 +604,10 @@ def _sse_event(event: str, data: object) -> str:
 
 
 def _serialize_session(session: InterviewSession) -> dict:
+    """把 ORM 会话转换为可安全 JSON 序列化的响应数据。"""
     return InterviewSessionRead.model_validate(session).model_dump(mode="json")
 
 
 async def _completed_session_stream(session: InterviewSession) -> AsyncIterator[str]:
+    """为幂等命中的流式请求只发送最终完成事件。"""
     yield _sse_event("complete", _serialize_session(session))

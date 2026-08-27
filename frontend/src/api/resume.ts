@@ -63,7 +63,7 @@ export function fetchResume(id: number, timeoutMs = 10_000) {
   return apiClient.get<ResumeVersion>(`/resumes/${id}`, { timeout: timeoutMs })
 }
 
-export async function waitForResumeParsing(id: number, timeoutMs = 40_000) {
+export async function waitForResumeParsing(id: number, timeoutMs = 70_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     await delay(Math.min(800, Math.max(0, deadline - Date.now())))

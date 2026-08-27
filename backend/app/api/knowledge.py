@@ -1,3 +1,5 @@
+"""知识库 HTTP 接口：负责管理员权限和错误到 HTTP 状态的映射。"""
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,15 +17,15 @@ from app.services.knowledge_service import (
     KnowledgeDataQualityError,
     KnowledgeIndexingError,
     KnowledgeReindexConflict,
-    create_knowledge_document,
-    create_uploaded_knowledge_document,
-    delete_knowledge_document,
+    create_knowledge_document_and_commit,
+    create_uploaded_knowledge_document_and_commit,
+    delete_knowledge_document_and_commit,
     get_knowledge_document,
     get_reindex_job,
     list_knowledge_documents,
-    reindex_knowledge_documents,
-    retry_knowledge_document_index,
-    update_knowledge_document,
+    reindex_knowledge_documents_and_commit,
+    retry_knowledge_document_index_and_commit,
+    update_knowledge_document_and_commit,
 )
 
 
@@ -37,15 +39,14 @@ async def create_document(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeDocumentRead:
+    """创建知识文档，并把领域错误转换为稳定的 HTTP 响应。"""
+    del current_user
     try:
-        document = await create_knowledge_document(db, payload)
+        document = await create_knowledge_document_and_commit(db, payload)
     except KnowledgeDataQualityError as exc:
-        await db.commit()
         raise _quality_http_error(exc) from exc
     except KnowledgeIndexingError as exc:
-        await db.commit()
         raise _indexing_http_error(exc) from exc
-    await db.commit()
     return document
 
 
@@ -55,6 +56,8 @@ async def list_documents(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[KnowledgeDocumentRead]:
+    """返回全部知识库文档。"""
+    del current_user
     return await list_knowledge_documents(db)
 
 
@@ -65,6 +68,8 @@ async def get_document(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeDocumentRead:
+    """返回指定知识库文档。"""
+    del current_user
     document = await get_knowledge_document(db, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -79,17 +84,16 @@ async def update_document(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeDocumentRead:
+    """更新知识文档，并映射质量检查或索引失败。"""
+    del current_user
     try:
-        document = await update_knowledge_document(db, document_id, payload)
+        document = await update_knowledge_document_and_commit(db, document_id, payload)
     except KnowledgeDataQualityError as exc:
-        await db.commit()
         raise _quality_http_error(exc) from exc
     except KnowledgeIndexingError as exc:
-        await db.commit()
         raise _indexing_http_error(exc) from exc
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    await db.commit()
     return document
 
 
@@ -100,14 +104,14 @@ async def delete_document(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    """删除知识文档，并映射向量索引删除失败。"""
+    del current_user
     try:
-        deleted = await delete_knowledge_document(db, document_id)
+        deleted = await delete_knowledge_document_and_commit(db, document_id)
     except KnowledgeIndexingError as exc:
-        await db.commit()
         raise _indexing_http_error(exc) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    await db.commit()
     return None
 
 
@@ -121,16 +125,15 @@ async def upload_document_file(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeDocumentRead:
+    """解析上传文件并创建知识库文档。"""
+    del current_user
     parsed_upload = await build_document_from_upload(file, title, category, target_position)
     try:
-        document = await create_uploaded_knowledge_document(db, parsed_upload)
+        document = await create_uploaded_knowledge_document_and_commit(db, parsed_upload)
     except KnowledgeDataQualityError as exc:
-        await db.commit()
         raise _quality_http_error(exc) from exc
     except KnowledgeIndexingError as exc:
-        await db.commit()
         raise _indexing_http_error(exc) from exc
-    await db.commit()
     return document
 
 
@@ -141,17 +144,16 @@ async def retry_document_index(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeDocumentRead:
+    """重试指定文档的向量索引。"""
+    del current_user
     try:
-        document = await retry_knowledge_document_index(db, document_id)
+        document = await retry_knowledge_document_index_and_commit(db, document_id)
     except KnowledgeDataQualityError as exc:
-        await db.commit()
         raise _quality_http_error(exc) from exc
     except KnowledgeIndexingError as exc:
-        await db.commit()
         raise _indexing_http_error(exc) from exc
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    await db.commit()
     return document
 
 # 重建知识库文档索引。
@@ -160,11 +162,12 @@ async def reindex_knowledge(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeReindexResult:
+    """重建全部知识文档的向量索引。"""
+    del current_user
     try:
-        result = await reindex_knowledge_documents(db)
+        result = await reindex_knowledge_documents_and_commit(db)
     except KnowledgeReindexConflict as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    await db.commit()
     return result
 
 
@@ -174,6 +177,8 @@ async def get_knowledge_reindex_job(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeReindexResult:
+    """返回指定全量重建任务的状态。"""
+    del current_user
     result = await get_reindex_job(db, job_id)
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reindex job not found")

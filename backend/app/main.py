@@ -6,7 +6,6 @@ import logging
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 import app.models  # noqa: F401
@@ -219,7 +218,6 @@ async def ensure_interview_score_columns(conn) -> None:
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

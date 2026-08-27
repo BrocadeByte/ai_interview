@@ -108,7 +108,7 @@ def valid_parse_output() -> ResumeParseOutput:
 
 def test_resume_parse_configuration_defaults() -> None:
     assert Settings.model_fields["resume_parse_model"].default == ""
-    assert Settings.model_fields["resume_parse_timeout_seconds"].default == 35
+    assert Settings.model_fields["resume_parse_timeout_seconds"].default == 60
 
 
 @pytest.mark.anyio
@@ -300,14 +300,14 @@ async def test_resume_parser_uses_dedicated_model_when_configured(monkeypatch) -
 
     monkeypatch.setattr(resume_service, "ChatOpenAI", fake_chat_openai)
     monkeypatch.setattr(resume_service.settings, "resume_parse_model", "fast-resume-model")
-    monkeypatch.setattr(resume_service.settings, "resume_parse_timeout_seconds", 35)
+    monkeypatch.setattr(resume_service.settings, "resume_parse_timeout_seconds", 60)
 
     result = await resume_service.parse_resume_text("Python FastAPI 项目经验")
 
     assert result.parsed.skills == ["Python", "FastAPI"]
     assert constructor_options["model"] == "fast-resume-model"
     assert constructor_options["temperature"] == 0
-    assert constructor_options["timeout"] == 35
+    assert constructor_options["timeout"] == 60
     assert constructor_options["max_retries"] == 0
 
 

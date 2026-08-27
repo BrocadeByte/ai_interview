@@ -18,7 +18,108 @@ from app.schemas.practice import (
     PracticeFromQuestionReviewCreate,
     PracticeFromReportCreate,
 )
+from app.services.analytics_service import record_analytics_event_safely
 from app.services.question_review_service import ensure_question_reviews
+
+
+async def create_report_practice_and_commit(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    payload: PracticeFromReportCreate,
+) -> PracticeSession:
+    """从报告薄弱项创建专项练习，记录漏斗事件后提交事务。"""
+    practice = await create_practice_from_report(db, user_id, payload)
+    await _record_practice_created(db, user_id, practice)
+    await db.commit()
+    return practice
+
+
+async def create_question_practice_and_commit(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    payload: PracticeFromQuestionReviewCreate,
+) -> PracticeSession:
+    """从逐题复盘创建专项练习，记录漏斗事件后提交事务。"""
+    practice = await create_practice_from_question_review(db, user_id, payload)
+    await _record_practice_created(db, user_id, practice)
+    await db.commit()
+    return practice
+
+
+async def list_practices_and_commit(
+    db: AsyncSession,
+    user_id: int,
+) -> list[PracticeSession]:
+    """刷新并返回用户练习列表，提交刷新过程中产生的状态变化。"""
+    practices = await list_owned_practices(db, user_id)
+    await db.commit()
+    return practices
+
+
+async def start_practice_and_commit(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    practice_id: int,
+) -> InterviewSession:
+    """启动专项练习会话并提交状态变更。"""
+    session = await start_owned_practice(db, user_id, practice_id)
+    await db.commit()
+    return session
+
+
+async def start_retest_and_commit(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    practice_id: int,
+) -> InterviewSession:
+    """基于专项练习创建复测会话并提交状态变更。"""
+    session = await start_owned_retest(db, user_id, practice_id)
+    await db.commit()
+    return session
+
+
+async def get_comparison_and_commit(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    practice_id: int,
+) -> PracticeComparisonRead:
+    """生成练习前后对比，记录查看事件并提交可能冻结的对比快照。"""
+    comparison = await get_practice_comparison(db, user_id, practice_id)
+    await record_analytics_event_safely(
+        db,
+        event_name="comparison_viewed",
+        user_id=user_id,
+        report_id=comparison.source_report_id,
+        practice_id=practice_id,
+        deduplication_key=f"comparison_viewed:{user_id}:{practice_id}",
+        properties={"comparison_ready": comparison.after is not None},
+    )
+    await db.commit()
+    return comparison
+
+
+async def _record_practice_created(
+    db: AsyncSession,
+    user_id: int,
+    practice: PracticeSession,
+) -> None:
+    """用统一字段记录两种练习创建入口。"""
+    await record_analytics_event_safely(
+        db,
+        event_name="practice_created",
+        user_id=user_id,
+        session_id=practice.practice_session_id,
+        report_id=practice.source_report_id,
+        practice_id=practice.id,
+        question_review_id=practice.source_question_review_id,
+        deduplication_key=f"practice_created:{practice.id}",
+        properties={"practice_mode": practice.practice_mode},
+    )
 
 
 async def create_practice_from_report(
@@ -26,7 +127,7 @@ async def create_practice_from_report(
     user_id: int,
     payload: PracticeFromReportCreate,
 ) -> PracticeSession:
-    """Create a practice source snapshot from a report weakness and its closest review."""
+    """从报告薄弱项和最匹配的逐题复盘创建不可变练习来源快照。"""
     report, source_session = await _get_owned_report(db, user_id, payload.report_id)
     report_weaknesses = _string_list(report.weaknesses)
     weakness_index = _find_exact_index(report_weaknesses, payload.weakness_title)
@@ -61,7 +162,7 @@ async def create_practice_from_question_review(
     user_id: int,
     payload: PracticeFromQuestionReviewCreate,
 ) -> PracticeSession:
-    """Create a practice source snapshot after validating every client-supplied source id."""
+    """校验客户端提供的全部来源 ID 后创建逐题专项练习快照。"""
     report, source_session = await _get_owned_report(db, user_id, payload.report_id)
     await ensure_question_reviews(db, report)
     review = await db.scalar(

@@ -6,6 +6,7 @@ from app.agents.state import InterviewState
 
 
 async def mark_finished_node(state: InterviewState) -> dict:
+    """返回结束状态增量，统一生成面试完成提示。"""
     return {
         "status": "finished",
         "current_question": "本次模拟面试已完成。可以查看评分与复盘报告。",
@@ -40,7 +41,7 @@ def build_interview_graph():
 
     start 路径负责规划并出首题；answer 路径在一次调用里完成评分、追问判断和下一题
     生成；finish 路径直接标记结束。节点只返回状态增量，持久化由接口服务在图执行
-    完成后统一处理。
+    完成后由 Service 统一处理。
     """
     graph = StateGraph(InterviewState)
 
@@ -72,5 +73,3 @@ def build_interview_graph():
 
 
 interview_graph = build_interview_graph()
-start_interview_graph = interview_graph
-answer_graph = interview_graph

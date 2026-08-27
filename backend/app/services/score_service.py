@@ -10,7 +10,7 @@ from app.services.citation_service import citations_from_json, citations_to_json
 
 
 async def save_latest_score(db: AsyncSession, session_id: int, scores: list[dict[str, Any]]) -> InterviewScore | None:
-    """保存 answer_graph 本次生成的最后一条评分；评分列表为空时不写入数据库。"""
+    """保存面试图本次生成的最后一条评分；评分列表为空时不写入数据库。"""
     if not scores:
         return None
 

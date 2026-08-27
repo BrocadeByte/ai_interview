@@ -14,8 +14,8 @@ from app.models.user import User
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
-# 解析访问令牌并获取当前用户。
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)) -> User:
+    """校验 Access Token 与服务端会话，并注入当前登录用户。"""
     claims = decode_access_token(token)
     if claims is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication token")
@@ -41,8 +41,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     return user
 
 
-# 校验当前用户是否具有管理员权限。
 async def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    """在当前用户依赖之上继续校验管理员权限。"""
     if not current_user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin permission required")
     return current_user

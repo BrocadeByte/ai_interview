@@ -1,7 +1,6 @@
-from pathlib import Path
+"""异步知识摄取 HTTP 接口：负责管理员权限和表单参数适配。"""
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_admin_user
@@ -9,9 +8,13 @@ from app.core.database import get_db
 from app.models.knowledge import KnowledgeIngestionTask
 from app.models.user import User
 from app.schemas.knowledge_task import KnowledgeIngestionTaskRead
-from app.services.knowledge_file_service import ALLOWED_KNOWLEDGE_SUFFIXES, MAX_KNOWLEDGE_FILE_BYTES
-from app.services.knowledge_ingestion_service import create_upload_task
-from app.services.knowledge_queue import publish_ingestion_task
+from app.services.knowledge_ingestion_service import (
+    get_ingestion_task as get_ingestion_task_service,
+    ingestion_task_to_read,
+    list_ingestion_tasks as list_ingestion_tasks_service,
+    retry_ingestion_task as retry_ingestion_task_service,
+    submit_upload_task,
+)
 
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge-ingestion"])
@@ -26,34 +29,15 @@ async def upload_document_file_async(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeIngestionTaskRead:
-    filename = file.filename or "uploaded"
-    suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_KNOWLEDGE_SUFFIXES:
-        raise HTTPException(status_code=400, detail="Only .txt, .md and .pdf files are supported")
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    if len(content) > MAX_KNOWLEDGE_FILE_BYTES:
-        raise HTTPException(status_code=413, detail="Uploaded file is too large")
-    task = await create_upload_task(
+    """保存知识文件并提交异步解析、向量化任务。"""
+    del current_user
+    return await submit_upload_task(
         db,
-        title=(title or Path(filename).stem).strip(),
-        category=category.strip(),
-        target_position=(target_position or "general").strip() or "general",
-        filename=filename,
-        file_type=suffix[1:],
-        file_size=len(content),
-        original_content=content,
+        file=file,
+        title=title,
+        category=category,
+        target_position=target_position,
     )
-    try:
-        await publish_ingestion_task(task.id)
-    except Exception as exc:
-        task.status = "publish_failed"
-        task.stage = "publish_failed"
-        task.error = f"{type(exc).__name__}: {exc}"[:2000]
-        await db.commit()
-        raise HTTPException(status_code=503, detail="Task saved but RabbitMQ publish failed") from exc
-    return _to_read(task)
 
 
 @router.get("/ingestion-tasks", response_model=list[KnowledgeIngestionTaskRead])
@@ -62,11 +46,9 @@ async def list_ingestion_tasks(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[KnowledgeIngestionTaskRead]:
-    statement = select(KnowledgeIngestionTask).order_by(KnowledgeIngestionTask.created_at.desc())
-    if task_status:
-        statement = statement.where(KnowledgeIngestionTask.status == task_status)
-    tasks = await db.scalars(statement)
-    return [_to_read(task) for task in tasks]
+    """返回知识摄取任务列表，可按状态筛选。"""
+    del current_user
+    return await list_ingestion_tasks_service(db, task_status)
 
 
 @router.get("/ingestion-tasks/{task_id}", response_model=KnowledgeIngestionTaskRead)
@@ -75,6 +57,8 @@ async def get_ingestion_task(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeIngestionTaskRead:
+    """返回指定知识摄取任务。"""
+    del current_user
     return _to_read(await _get_task(db, task_id))
 
 
@@ -84,6 +68,8 @@ async def retry_ingestion_task(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeIngestionTaskRead:
+    """重试失败或死亡的知识摄取任务。"""
+    del current_user
     return await _reset_and_publish(db, task_id, reset_attempts=False)
 
 
@@ -93,40 +79,25 @@ async def reexecute_ingestion_task(
     current_user: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeIngestionTaskRead:
+    """允许管理员重新执行失败任务或已成功任务。"""
+    del current_user
     return await _reset_and_publish(db, task_id, reset_attempts=True)
 
 
 async def _reset_and_publish(db: AsyncSession, task_id: int, *, reset_attempts: bool) -> KnowledgeIngestionTaskRead:
-    task = await _get_task(db, task_id)
-    allowed = {"failed", "dead", "publish_failed"}
-    if reset_attempts:
-        allowed.add("succeeded")
-    if task.status not in allowed:
-        raise HTTPException(status_code=409, detail="Task cannot be retried in its current state")
-    task.status = "pending"
-    task.stage = "queued"
-    task.error = None
-    task.finished_at = None
-    if reset_attempts:
-        task.attempts = 0
-    await db.commit()
-    try:
-        await publish_ingestion_task(task.id)
-    except Exception as exc:
-        task.status = "publish_failed"
-        task.stage = "publish_failed"
-        task.error = f"{type(exc).__name__}: {exc}"[:2000]
-        await db.commit()
-        raise HTTPException(status_code=503, detail="Task reset but RabbitMQ publish failed") from exc
-    return _to_read(task)
+    """兼容入口：重置并重新发布知识摄取任务。"""
+    return await retry_ingestion_task_service(
+        db,
+        task_id,
+        reset_attempts=reset_attempts,
+    )
 
 
 async def _get_task(db: AsyncSession, task_id: int) -> KnowledgeIngestionTask:
-    task = await db.scalar(select(KnowledgeIngestionTask).where(KnowledgeIngestionTask.id == task_id))
-    if not task:
-        raise HTTPException(status_code=404, detail="Ingestion task not found")
-    return task
+    """兼容入口：读取知识摄取任务。"""
+    return await get_ingestion_task_service(db, task_id)
 
 
 def _to_read(task: KnowledgeIngestionTask) -> KnowledgeIngestionTaskRead:
-    return KnowledgeIngestionTaskRead.model_validate(task, from_attributes=True)
+    """兼容入口：转换知识摄取任务响应模型。"""
+    return ingestion_task_to_read(task)

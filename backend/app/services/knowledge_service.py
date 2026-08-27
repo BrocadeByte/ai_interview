@@ -1,9 +1,10 @@
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import uuid4
 
 from sqlalchemy import select, text
@@ -35,6 +36,7 @@ CONTENT_PREVIEW_CHARS = 8000
 REINDEX_LOCK_NAME = "knowledge_full_reindex"
 REINDEX_RECOVERY = "Active alias remains on the previous collection; retry creates a fresh collection."
 _process_reindex_lock = asyncio.Lock()
+OperationResult = TypeVar("OperationResult")
 
 KNOWLEDGE_CATEGORIES = {
     "planning": ["岗位能力", "面试计划", "planning"],
@@ -62,6 +64,79 @@ class KnowledgeDataQualityError(RuntimeError):
         super().__init__(reason)
         self.document_id = document_id
         self.reason = reason
+
+
+async def create_knowledge_document_and_commit(
+    db: AsyncSession,
+    payload: KnowledgeDocumentCreate,
+) -> KnowledgeDocumentRead:
+    """创建知识文档，并提交成功状态或可重试的失败状态。"""
+    return await _commit_index_operation(db, create_knowledge_document(db, payload))
+
+
+async def create_uploaded_knowledge_document_and_commit(
+    db: AsyncSession,
+    parsed_upload: Any,
+) -> KnowledgeDocumentRead:
+    """创建上传文档，并提交成功状态或可重试的失败状态。"""
+    return await _commit_index_operation(
+        db,
+        create_uploaded_knowledge_document(db, parsed_upload),
+    )
+
+
+async def update_knowledge_document_and_commit(
+    db: AsyncSession,
+    document_id: int,
+    payload: KnowledgeDocumentUpdate,
+) -> KnowledgeDocumentRead | None:
+    """更新知识文档并提交索引同步结果。"""
+    return await _commit_index_operation(
+        db,
+        update_knowledge_document(db, document_id, payload),
+    )
+
+
+async def delete_knowledge_document_and_commit(
+    db: AsyncSession,
+    document_id: int,
+) -> bool:
+    """删除知识文档并提交向量索引同步结果。"""
+    return await _commit_index_operation(db, delete_knowledge_document(db, document_id))
+
+
+async def retry_knowledge_document_index_and_commit(
+    db: AsyncSession,
+    document_id: int,
+) -> KnowledgeDocumentRead | None:
+    """重试单篇文档索引并提交最新状态。"""
+    return await _commit_index_operation(
+        db,
+        retry_knowledge_document_index(db, document_id),
+    )
+
+
+async def reindex_knowledge_documents_and_commit(
+    db: AsyncSession,
+) -> KnowledgeReindexResult:
+    """重建全量索引并提交任务结果。"""
+    result = await reindex_knowledge_documents(db)
+    await db.commit()
+    return result
+
+
+async def _commit_index_operation(
+    db: AsyncSession,
+    operation: Awaitable[OperationResult],
+) -> OperationResult:
+    """统一提交索引操作；失败状态同样需要落库，随后保留原异常交给 API 映射。"""
+    try:
+        result = await operation
+    except (KnowledgeDataQualityError, KnowledgeIndexingError):
+        await db.commit()
+        raise
+    await db.commit()
+    return result
 
 
 def _validated_payload(payload: KnowledgeDocumentCreate) -> KnowledgeDocumentCreate:

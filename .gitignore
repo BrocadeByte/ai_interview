@@ -19,6 +19,7 @@ secrets.*
 .pytest_cache/
 .codex-edits/
 .playwright-cli/
+.workbuddy/
 *.log
 frontend/node_modules/
 frontend/dist/

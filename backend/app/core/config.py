@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     llm_request_timeout_seconds: int = 120
     llm_max_retries: int = 2
     resume_parse_model: str = ""
-    resume_parse_timeout_seconds: int = 35
+    resume_parse_timeout_seconds: int = 60
     embedding_cache_size: int = 512
     embedding_cache_ttl_seconds: int = 3600
     rabbitmq_url: str = "amqp://admin:admin123@192.168.150.101:5672/"

@@ -1,3 +1,5 @@
+"""专项练习 HTTP 接口：只接收参数并注入用户、数据库依赖。"""
+
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,14 +14,13 @@ from app.schemas.practice import (
     PracticeFromReportCreate,
     PracticeListItem,
 )
-from app.services.analytics_service import record_analytics_event_safely
 from app.services.practice_service import (
-    create_practice_from_question_review,
-    create_practice_from_report,
-    get_practice_comparison,
-    list_owned_practices,
-    start_owned_practice,
-    start_owned_retest,
+    create_question_practice_and_commit,
+    create_report_practice_and_commit,
+    get_comparison_and_commit,
+    list_practices_and_commit,
+    start_practice_and_commit,
+    start_retest_and_commit,
 )
 
 
@@ -36,20 +37,12 @@ async def create_from_report(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    practice = await create_practice_from_report(db, current_user.id, payload)
-    await record_analytics_event_safely(
+    """从报告薄弱项创建专项练习。"""
+    return await create_report_practice_and_commit(
         db,
-        event_name="practice_created",
         user_id=current_user.id,
-        session_id=practice.practice_session_id,
-        report_id=practice.source_report_id,
-        practice_id=practice.id,
-        question_review_id=practice.source_question_review_id,
-        deduplication_key=f"practice_created:{practice.id}",
-        properties={"practice_mode": practice.practice_mode},
+        payload=payload,
     )
-    await db.commit()
-    return practice
 
 
 @router.post(
@@ -62,20 +55,12 @@ async def create_from_question_review(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    practice = await create_practice_from_question_review(db, current_user.id, payload)
-    await record_analytics_event_safely(
+    """从指定逐题复盘创建专项练习。"""
+    return await create_question_practice_and_commit(
         db,
-        event_name="practice_created",
         user_id=current_user.id,
-        session_id=practice.practice_session_id,
-        report_id=practice.source_report_id,
-        practice_id=practice.id,
-        question_review_id=practice.source_question_review_id,
-        deduplication_key=f"practice_created:{practice.id}",
-        properties={"practice_mode": practice.practice_mode},
+        payload=payload,
     )
-    await db.commit()
-    return practice
 
 
 @router.get("", response_model=list[PracticeListItem])
@@ -83,9 +68,8 @@ async def list_practices(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    practices = await list_owned_practices(db, current_user.id)
-    await db.commit()
-    return practices
+    """返回当前用户的专项练习列表。"""
+    return await list_practices_and_commit(db, current_user.id)
 
 
 @router.post("/{practice_id}/start", response_model=InterviewSessionRead)
@@ -94,9 +78,12 @@ async def start_practice(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    session = await start_owned_practice(db, current_user.id, practice_id)
-    await db.commit()
-    return session
+    """启动专项练习对应的面试会话。"""
+    return await start_practice_and_commit(
+        db,
+        user_id=current_user.id,
+        practice_id=practice_id,
+    )
 
 
 @router.post("/{practice_id}/start-retest", response_model=InterviewSessionRead)
@@ -105,9 +92,12 @@ async def start_retest(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    session = await start_owned_retest(db, current_user.id, practice_id)
-    await db.commit()
-    return session
+    """为指定专项练习启动复测会话。"""
+    return await start_retest_and_commit(
+        db,
+        user_id=current_user.id,
+        practice_id=practice_id,
+    )
 
 
 @router.get("/{practice_id}/comparison", response_model=PracticeComparisonRead)
@@ -116,15 +106,9 @@ async def get_comparison(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    comparison = await get_practice_comparison(db, current_user.id, practice_id)
-    await record_analytics_event_safely(
+    """返回专项练习前后的评分与薄弱项对比。"""
+    return await get_comparison_and_commit(
         db,
-        event_name="comparison_viewed",
         user_id=current_user.id,
-        report_id=comparison.source_report_id,
         practice_id=practice_id,
-        deduplication_key=f"comparison_viewed:{current_user.id}:{practice_id}",
-        properties={"comparison_ready": comparison.after is not None},
     )
-    await db.commit()
-    return comparison
