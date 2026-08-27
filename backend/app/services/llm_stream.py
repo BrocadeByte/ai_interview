@@ -79,8 +79,8 @@ async def invoke_json_with_streaming_field(
 async def publish_committed_text(
     text: str,
     *,
-    chunk_chars: int = 12,
-    chunk_delay_seconds: float = 0.015,
+    chunk_chars: int = 3,
+    chunk_delay_seconds: float = 0.04,
 ) -> None:
     """Stream authoritative text only after the business transaction has committed."""
     callback = _stream_delta_callback.get()
