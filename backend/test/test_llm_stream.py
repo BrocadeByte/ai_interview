@@ -29,7 +29,7 @@ class ChunkedLLM:
 
 
 @pytest.mark.anyio
-async def test_model_question_is_streamed_as_draft_then_authoritative_text_is_published() -> None:
+async def test_model_question_is_not_published_until_authoritative_text_is_committed() -> None:
     chunks = [
         '{"question":"Unvalidated ',
         'question?","dimension":"backend"}',
@@ -50,8 +50,9 @@ async def test_model_question_is_streamed_as_draft_then_authoritative_text_is_pu
             ChunkedLLM(chunks),
             [],
             field="question",
+            stream_field=False,
         )
-        assert "".join(deltas) == "Unvalidated question?"
+        assert deltas == []
         assert completed == []
 
         await publish_committed_text("Validated committed question?")
@@ -60,7 +61,8 @@ async def test_model_question_is_streamed_as_draft_then_authoritative_text_is_pu
         reset_stream_delta_callback(delta_token)
 
     assert response.content == "".join(chunks)
-    assert "".join(deltas) == "Unvalidated question?"
+    assert len(deltas) > 1
+    assert "".join(deltas) == "Validated committed question?"
     assert completed == ["Validated committed question?"]
 
 

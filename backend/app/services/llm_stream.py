@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -75,8 +76,13 @@ async def invoke_json_with_streaming_field(
     return SimpleNamespace(content="".join(chunks))
 
 
-async def publish_committed_text(text: str) -> None:
-    """Confirm one authoritative committed text after any provisional field deltas."""
+async def publish_committed_text(
+    text: str,
+    *,
+    chunk_chars: int = 12,
+    chunk_delay_seconds: float = 0.015,
+) -> None:
+    """Stream authoritative text only after the business transaction has committed."""
     callback = _stream_delta_callback.get()
     done_callback = _stream_text_done_callback.get()
     if callback is None and done_callback is None:
@@ -84,11 +90,16 @@ async def publish_committed_text(text: str) -> None:
     authoritative = str(text or "").strip()
     if not authoritative:
         raise ValueError("Committed stream text must be non-empty")
+    if callback is not None:
+        size = max(1, chunk_chars)
+        starts = range(0, len(authoritative), size)
+        for start in starts:
+            await callback(authoritative[start : start + size])
+            if start + size < len(authoritative):
+                # Yield a short, bounded interval so browsers render real incremental text.
+                await asyncio.sleep(max(0, chunk_delay_seconds))
     if done_callback is not None:
         await done_callback(authoritative)
-    elif callback is not None:
-        # 兼容只注册单一回调的独立调用方。
-        await callback(authoritative)
 
 
 def extract_json_string_field(raw: str, field: str) -> str:

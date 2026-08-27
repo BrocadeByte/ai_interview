@@ -195,8 +195,8 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
             llm,
             [SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)), HumanMessage(content=user_prompt)],
             field="question",
-            # 达到追问上限后，模型问题必然会被下方的确定性路由替换，不展示无效草稿。
-            stream_field=not reached_max_followup,
+            # 模型输出先完整校验并由 Service 提交；API 随后只流式发送权威问题。
+            stream_field=False,
         )
         output = await parse_json_model_with_repair(
             response.content,

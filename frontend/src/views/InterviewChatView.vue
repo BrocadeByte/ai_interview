@@ -7,37 +7,48 @@ import 'element-plus/theme-chalk/el-progress.css'
 import 'element-plus/theme-chalk/el-result.css'
 import 'element-plus/theme-chalk/el-skeleton.css'
 import 'element-plus/theme-chalk/el-tag.css'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { fetchInterview, fetchInterviewScores, finishInterview, rememberInterview, streamAnswer, streamInterviewStart, takeRememberedInterview, type InterviewMessage, type InterviewScore, type InterviewSession } from '../api/interview'
+import { fetchInterview, fetchInterviewScores, finishInterview, rememberInterview, takeRememberedInterview, type InterviewScore, type InterviewSession } from '../api/interview'
 import { getApiErrorMessage } from '../api/client'
 import { startPracticeRetest } from '../api/practice'
 import ChatMessage from '../components/interview/ChatMessage.vue'
 import LiveScorePanel from '../components/interview/LiveScorePanel.vue'
-import { createRequestId } from '../utils/request-id'
+import { useInterviewRuntimeStore } from '../stores/interview-runtime'
 
 const route = useRoute()
 const router = useRouter()
-const session = ref<InterviewSession | null>(null)
-const answer = ref('')
-const loading = ref(false)
+const sessionId = Number(route.params.id)
+const runtimeStore = useInterviewRuntimeStore()
+const runtime = runtimeStore.forSession(sessionId)
+const session = computed<InterviewSession | null>({
+  get: () => runtime.session,
+  set: (value) => {
+    if (value) runtimeStore.setSession(sessionId, value)
+    else runtime.session = null
+  }
+})
+const answer = computed({
+  get: () => runtime.answer,
+  set: (value: string) => { runtime.answer = value }
+})
+const loading = computed(() => runtime.loading)
+const starting = computed(() => runtime.starting)
+const streamingAssistantMessage = computed(() => runtime.streamingAssistantMessage)
+const streamPhase = computed(() => runtime.streamPhase)
+const streamTextDone = computed(() => runtime.streamTextDone)
+const pendingUserMessage = computed(() => runtime.pendingUserMessage)
 const finishing = ref(false)
-const starting = ref(false)
-const streamingAssistantMessage = ref<InterviewMessage | null>(null)
-const streamPhase = ref('')
-const streamTextDone = ref(false)
-const pendingUserMessage = ref<InterviewMessage | null>(null)
 const chatBox = ref<HTMLElement | null>(null)
 const interviewPage = ref<HTMLElement | null>(null)
-const retryableAnswer = ref<{ answer: string; requestId: string } | null>(null)
 const initialLoading = ref(true)
 const scores = ref<InterviewScore[]>([])
 const scoresLoading = ref(false)
 const scoresError = ref(false)
 let scoreRefreshQueued = false
+let viewMounted = false
 
-const sessionId = Number(route.params.id)
 const latestScore = computed(() => scores.value[scores.value.length - 1] || null)
 const isTrainingMode = computed(() => session.value?.mode !== 'mock')
 const modeLabel = computed(() => isTrainingMode.value ? '训练模式' : '实战模式')
@@ -167,9 +178,11 @@ async function loadScores() {
 
 async function load() {
   try {
-    const remembered = takeRememberedInterview(sessionId)
-    const data = remembered || (await fetchInterview(sessionId)).data
-    session.value = data
+    const remembered = runtime.session ? null : takeRememberedInterview(sessionId)
+    const data = runtime.session || remembered || (await fetchInterview(sessionId)).data
+    runtimeStore.setSession(sessionId, data)
+    const pendingError = runtimeStore.consumeError(sessionId)
+    if (pendingError) ElMessage.error(pendingError)
     if (await advancePracticeFlow(data)) return
     if (data.mode === 'training') void loadScores()
     await scrollToBottom()
@@ -189,6 +202,7 @@ function syncVisualViewport() {
 }
 
 onMounted(() => {
+  viewMounted = true
   syncVisualViewport()
   window.visualViewport?.addEventListener('resize', syncVisualViewport)
   window.visualViewport?.addEventListener('scroll', syncVisualViewport)
@@ -196,114 +210,34 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  viewMounted = false
   window.visualViewport?.removeEventListener('resize', syncVisualViewport)
   window.visualViewport?.removeEventListener('scroll', syncVisualViewport)
 })
 
 async function startFirstQuestion() {
   if (starting.value) return
-  starting.value = true
-  streamTextDone.value = false
-  streamingAssistantMessage.value = {
-    id: -Date.now(),
-    role: 'assistant',
-    content: '',
-    question_index: 1,
-    is_followup: 0,
-    followup_index: 0,
-    created_at: new Date().toISOString()
-  }
-  try {
-    await streamInterviewStart(sessionId, (event) => {
-      if (event.event === 'status') {
-        streamPhase.value = event.data.phase
-      } else if (event.event === 'draft_delta' && streamingAssistantMessage.value) {
-        streamingAssistantMessage.value.content += event.data.content
-        void scrollToBottom()
-      } else if (event.event === 'text_done') {
-        if (streamingAssistantMessage.value) streamingAssistantMessage.value.content = event.data.content
-        streamTextDone.value = true
-      } else if (event.event === 'complete') {
-        session.value = event.data
-        streamingAssistantMessage.value = null
-      }
-    })
-    await scrollToBottom()
-  } catch (error) {
-    streamingAssistantMessage.value = null
-    const message = error instanceof Error ? error.message : getApiErrorMessage(error, 'Failed to generate the first question')
-    ElMessage.error(message)
-  } finally {
-    starting.value = false
-    streamPhase.value = ''
-    streamTextDone.value = false
+  const result = await runtimeStore.startFirstQuestion(sessionId)
+  if (!viewMounted) return
+  await scrollToBottom()
+  if (result.error) {
+    runtimeStore.consumeError(sessionId)
+    ElMessage.error(result.error)
   }
 }
 async function submitAnswer() {
   const submittedAnswer = answer.value.trim()
   if (!submittedAnswer || loading.value) return
 
-  loading.value = true
-  streamTextDone.value = false
-  let requestId = retryableAnswer.value?.answer === submittedAnswer
-    ? retryableAnswer.value.requestId
-    : ''
-
-  try {
-    requestId ||= createRequestId()
-    pendingUserMessage.value = {
-      id: -Date.now(),
-      role: 'user',
-      content: submittedAnswer,
-      question_index: session.value?.current_question_index || 1,
-      is_followup: latestAssistantMessage.value?.is_followup || 0,
-      followup_index: latestAssistantMessage.value?.followup_index || 0,
-      created_at: new Date().toISOString()
-    }
-    streamingAssistantMessage.value = {
-      id: -(Date.now() + 1),
-      role: 'assistant',
-      content: '',
-      question_index: session.value?.current_question_index || 1,
-      is_followup: 0,
-      followup_index: 0,
-      created_at: new Date().toISOString()
-    }
-    answer.value = ''
-    await scrollToBottom()
-
-    await streamAnswer(sessionId, submittedAnswer, requestId, (event) => {
-      if (event.event === 'status') {
-        streamPhase.value = event.data.phase
-      } else if (event.event === 'draft_delta' && streamingAssistantMessage.value) {
-        streamingAssistantMessage.value.content += event.data.content
-        void scrollToBottom()
-      } else if (event.event === 'text_done') {
-        if (streamingAssistantMessage.value) streamingAssistantMessage.value.content = event.data.content
-        streamTextDone.value = true
-      } else if (event.event === 'complete') {
-        session.value = event.data
-        pendingUserMessage.value = null
-        streamingAssistantMessage.value = null
-        retryableAnswer.value = null
-        void advancePracticeFlow(event.data)
-        if (isTrainingMode.value) void loadScores()
-      } else if (event.event === 'error') {
-        throw new Error(event.data.message)
-      }
-    })
-    await scrollToBottom()
-  } catch (error) {
-    answer.value = submittedAnswer
-    if (requestId) retryableAnswer.value = { answer: submittedAnswer, requestId }
-    pendingUserMessage.value = null
-    streamingAssistantMessage.value = null
-    const message = error instanceof Error ? error.message : getApiErrorMessage(error, 'Submit failed')
-    ElMessage.error(message)
-  } finally {
-    loading.value = false
-    streamPhase.value = ''
-    streamTextDone.value = false
+  const task = runtimeStore.submitAnswer(sessionId)
+  await scrollToBottom()
+  const result = await task
+  if (!viewMounted) return
+  await scrollToBottom()
+  if (result.error) {
+    runtimeStore.consumeError(sessionId)
+    ElMessage.error(result.error)
+    return
   }
 }
 async function finish() {
@@ -320,6 +254,23 @@ async function finish() {
     finishing.value = false
   }
 }
+
+watch(
+  () => [runtime.pendingUserMessage?.id, runtime.streamingAssistantMessage?.content],
+  () => {
+    if (viewMounted) void scrollToBottom()
+  }
+)
+
+watch(
+  () => runtime.completionVersion,
+  async (version, previousVersion) => {
+    if (!viewMounted || version === previousVersion || !runtime.session) return
+    await scrollToBottom()
+    if (await advancePracticeFlow(runtime.session)) return
+    if (runtime.session.mode === 'training') void loadScores()
+  }
+)
 </script>
 
 <template>
@@ -423,7 +374,7 @@ async function finish() {
 
       <form v-if="canAnswer" class="answer-box answer-composer" @submit.prevent="submitAnswer">
         <el-input v-model="answer" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" aria-label="本轮回答" placeholder="输入回答，建议说明背景、行动和结果" :disabled="loading" />
-        <el-button type="primary" native-type="submit" :loading="loading && !streamTextDone" :disabled="loading">{{ loading && streamTextDone ? '正在保存本轮结果…' : '提交回答' }}</el-button>
+        <el-button type="primary" native-type="submit" :loading="loading" :disabled="loading">{{ loading ? '处理中…' : '提交回答' }}</el-button>
       </form>
 
       <div v-else-if="isPreparingWithVisibleQuestion" class="answer-box answer-composer">

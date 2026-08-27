@@ -280,6 +280,8 @@ HR 不得生成纯技术八股题；项目深挖优先使用简历项目；技�
             llm,
             [SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)), HumanMessage(content=user_prompt)],
             field="question",
+            # 首题与计划提交后再流式发送，避免草稿与权威会话状态不一致。
+            stream_field=False,
         )
         output = await parse_json_model_with_repair(
             response.content,

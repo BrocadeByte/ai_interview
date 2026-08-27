@@ -144,7 +144,7 @@ async def start_interview_stream(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """以 SSE 启动面试，先推送模型草稿，提交后再确认权威首题文本。"""
+    """以 SSE 启动面试，业务提交后流式推送权威首题文本。"""
     session = await _load_session(db, current_user.id, session_id)
     if session.status == "finished":
         raise HTTPException(
@@ -178,7 +178,7 @@ async def start_interview_stream(
         async with stream_session_factory() as stream_db:
 
             async def emit_delta(delta: str) -> None:
-                await queue.put(_sse_event("draft_delta", {"content": delta}))
+                await queue.put(_sse_event("delta", {"content": delta}))
 
             async def emit_text_done(content: str) -> None:
                 await queue.put(_sse_event("text_done", {"content": content}))
@@ -357,7 +357,7 @@ async def answer_interview_stream(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """以 SSE 处理回答，并依次推送草稿、权威文本和已提交的会话状态。"""
+    """以 SSE 处理回答，业务提交后推送权威文本和完整会话状态。"""
     request_id = str(payload.request_id)
     session = await _load_session(db, current_user.id, session_id)
     completed_request = await find_completed_answer_request(
@@ -389,7 +389,7 @@ async def answer_interview_stream(
         async with stream_session_factory() as stream_db:
 
             async def emit_delta(delta: str) -> None:
-                await queue.put(_sse_event("draft_delta", {"content": delta}))
+                await queue.put(_sse_event("delta", {"content": delta}))
 
             async def emit_text_done(content: str) -> None:
                 await queue.put(_sse_event("text_done", {"content": content}))

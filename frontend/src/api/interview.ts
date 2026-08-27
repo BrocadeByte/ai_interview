@@ -8,6 +8,7 @@ export interface InterviewMessage {
   id: number
   role: 'assistant' | 'user'
   content: string
+  request_id?: string | null
   question_index: number
   is_followup: number
   followup_index: number
@@ -153,7 +154,7 @@ export function finishInterview(id: number) {
 
 export type InterviewStreamEvent =
   | { event: 'status'; data: { phase: string } }
-  | { event: 'draft_delta'; data: { content: string } }
+  | { event: 'delta'; data: { content: string } }
   | { event: 'text_done'; data: { content: string } }
   | { event: 'complete'; data: InterviewSession }
   | { event: 'error'; data: { message: string } }
@@ -186,7 +187,7 @@ async function consumeInterviewStream(
   onEvent: (event: InterviewStreamEvent) => void,
   signal?: AbortSignal
 ) {
-  // draft_delta 是模型草稿；text_done 和 complete 分别确认已提交文本与最终会话快照。
+  // delta 只传输已提交的权威文本；text_done 和 complete 确认全文与最终会话快照。
   const response = await authenticatedFetch(url, {
     method: 'POST',
     headers: {

@@ -168,7 +168,7 @@ async def test_duplicate_model_question_is_replaced(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
-async def test_answer_pipeline_publishes_question_as_draft_only(monkeypatch) -> None:
+async def test_answer_pipeline_does_not_publish_uncommitted_question(monkeypatch) -> None:
     monkeypatch.setattr(answer_pipeline, "llm", FakeLLM([
         '{"needs_followup":false,"decision_reason":"ok","question":"你如何处理 token 过期？","score":80,'
         + SUB_SCORES + ',"reason":"r","weaknesses":[],"suggestions":[]}'
@@ -191,7 +191,7 @@ async def test_answer_pipeline_publishes_question_as_draft_only(monkeypatch) -> 
         reset_stream_delta_callback(delta_token)
 
     assert result["current_question"] == "你如何处理 token 过期？"
-    assert "".join(deltas) == "你如何处理 token 过期？"
+    assert deltas == []
     assert completed == []
 
 

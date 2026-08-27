@@ -23,7 +23,7 @@ import app.models  # noqa: F401
 from app.core.config import settings
 from app.core.database import Base, get_db
 from app.main import app, ensure_interview_report_columns
-from app.models.interview import InterviewMemory, InterviewSession
+from app.models.interview import InterviewMemory, InterviewMessage, InterviewSession
 from app.models.report import InterviewReport
 from app.models.score import InterviewScore
 from app.models.user import User
@@ -446,25 +446,29 @@ async def test_start_stream_emits_first_question_deltas(client: AsyncClient) -> 
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
     assert events[0] == "status"
-    assert "draft_delta" in events
+    assert "delta" in events
     assert events[-1] == "complete"
-    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "draft_delta")
+    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "delta")
     assert events.index("text_done") < events.index("complete")
 
-    draft_text = "".join(
+    streamed_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: draft_delta")
+        if frame.startswith("event: delta")
     )
     completed = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    assert draft_text == completed["messages"][-1]["content"]
+    assert streamed_text == completed["messages"][-1]["content"]
     assert completed["status"] == "active"
     assert interview_planner.format_knowledge_context.calls == 1
     assert interview_planner.llm.calls == 1
     assert answer_pipeline.llm.calls == 0
 
 @pytest.mark.anyio
-async def test_answer_stream_emits_deltas_before_complete(client: AsyncClient) -> None:
+async def test_answer_stream_emits_committed_deltas_before_complete(
+    client: AsyncClient,
+    test_session_factory,
+    monkeypatch,
+) -> None:
     headers = await register_and_fill_profile(client)
     interview = (await client.post(
         "/api/interviews",
@@ -472,6 +476,29 @@ async def test_answer_stream_emits_deltas_before_complete(client: AsyncClient) -
         json={"target_position": "Python backend engineer", "difficulty": "medium"},
     )).json()
     await client.post(f"/api/interviews/{interview['id']}/start", headers=headers)
+    original_publish = interviews_api.publish_committed_text
+    committed_before_publish = False
+
+    async def assert_committed_before_publish(content: str) -> None:
+        nonlocal committed_before_publish
+        async with test_session_factory() as db:
+            message = await db.scalar(
+                select(InterviewMessage)
+                .where(
+                    InterviewMessage.session_id == interview["id"],
+                    InterviewMessage.role == "assistant",
+                )
+                .order_by(InterviewMessage.id.desc())
+            )
+            score = await db.scalar(
+                select(InterviewScore).where(InterviewScore.session_id == interview["id"])
+            )
+        assert message is not None and message.content == content
+        assert score is not None
+        committed_before_publish = True
+        await original_publish(content)
+
+    monkeypatch.setattr(interviews_api, "publish_committed_text", assert_committed_before_publish)
 
     response = await client.post(
         f"/api/interviews/{interview['id']}/answer/stream",
@@ -484,19 +511,20 @@ async def test_answer_stream_emits_deltas_before_complete(client: AsyncClient) -
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
     assert events[0] == "status"
-    assert "draft_delta" in events
+    assert "delta" in events
     assert events[-1] == "complete"
-    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "draft_delta")
+    assert events.index("text_done") > max(index for index, event in enumerate(events) if event == "delta")
     assert events.index("text_done") < events.index("complete")
 
-    draft_text = "".join(
+    streamed_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: draft_delta")
+        if frame.startswith("event: delta")
     )
     completed = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    assert draft_text == completed["messages"][-1]["content"]
+    assert streamed_text == completed["messages"][-1]["content"]
     assert completed["messages"][-1]["role"] == "assistant"
+    assert committed_before_publish is True
 
 @pytest.mark.anyio
 async def test_duplicate_answer_request_is_idempotent(client: AsyncClient) -> None:
@@ -754,15 +782,15 @@ async def test_answer_compacts_medium_memory_when_context_exceeds_threshold(
 def _stream_frames(response) -> tuple[list[str], list[str], str, dict]:
     frames = [frame for frame in response.text.split("\n\n") if frame and not frame.startswith(":")]
     events = [frame.splitlines()[0].removeprefix("event: ") for frame in frames]
-    draft_text = "".join(
+    streamed_text = "".join(
         __import__("json").loads(frame.split("data: ", 1)[1])["content"]
         for frame in frames
-        if frame.startswith("event: draft_delta")
+        if frame.startswith("event: delta")
     )
     text_done_frame = next(frame for frame in frames if frame.startswith("event: text_done"))
     text_done_content = __import__("json").loads(text_done_frame.split("data: ", 1)[1])["content"]
     complete = __import__("json").loads(frames[-1].split("data: ", 1)[1])
-    return frames, events, draft_text, {"text_done": text_done_content, "complete": complete}
+    return frames, events, streamed_text, {"text_done": text_done_content, "complete": complete}
 
 
 @pytest.mark.anyio
@@ -783,11 +811,11 @@ async def test_invalid_json_stream_publishes_only_committed_fallback(client: Asy
     )
 
     assert response.status_code == 200
-    _frames, events, draft_text, payloads = _stream_frames(response)
+    _frames, events, streamed_text, payloads = _stream_frames(response)
     complete = payloads["complete"]
     committed_text = complete["messages"][-1]["content"]
     assert events[-2:] == ["text_done", "complete"]
-    assert draft_text == ""
+    assert streamed_text == committed_text
     assert payloads["text_done"] == committed_text
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed_text
@@ -817,10 +845,11 @@ async def test_duplicate_question_stream_publishes_replacement_saved_to_database
     )
 
     assert response.status_code == 200
-    _frames, _events, draft_text, payloads = _stream_frames(response)
+    _frames, _events, streamed_text, payloads = _stream_frames(response)
     committed_text = payloads["complete"]["messages"][-1]["content"]
     assert committed_text != repeated
-    assert draft_text == repeated
+    assert streamed_text == committed_text
+    assert streamed_text != repeated
     assert payloads["text_done"] == committed_text
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed_text
@@ -868,13 +897,13 @@ async def test_followup_limit_stream_discards_model_followup_and_saves_next_main
     )
 
     assert response.status_code == 200
-    _frames, _events, draft_text, payloads = _stream_frames(response)
+    _frames, _events, streamed_text, payloads = _stream_frames(response)
     complete = payloads["complete"]
     committed = complete["messages"][-1]
     assert complete["current_question_index"] == 2
     assert committed["is_followup"] == 0
     assert committed["content"] != "followup 3?"
-    assert draft_text == ""
+    assert streamed_text == committed["content"]
     assert payloads["text_done"] == committed["content"]
     stored = (await client.get(f"/api/interviews/{interview['id']}", headers=headers)).json()
     assert stored["messages"][-1]["content"] == committed["content"]

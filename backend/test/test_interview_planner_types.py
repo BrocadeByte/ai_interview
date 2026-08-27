@@ -76,9 +76,10 @@ async def test_planner_prompt_contains_type_mode_resume_jd_and_practice_context(
         captured_query.update(kwargs)
         return "岗位知识"
 
-    async def fake_invoke(_llm, messages, *, field):
+    async def fake_invoke(_llm, messages, *, field, stream_field):
         captured_messages.extend(messages)
         assert field == "question"
+        assert stream_field is False
         return SimpleNamespace(
             content=(
                 '{"question":"请说明你会如何改进该能力点。","plan":['

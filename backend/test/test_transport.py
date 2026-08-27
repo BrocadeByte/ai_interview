@@ -14,8 +14,8 @@ def test_application_does_not_enable_gzip_middleware() -> None:
 @pytest.mark.anyio
 async def test_sse_response_emits_each_event_without_compression_buffering() -> None:
     expected_chunks = [
-        b'event: draft_delta\ndata: {"content":"first"}\n\n',
-        b'event: draft_delta\ndata: {"content":"second"}\n\n',
+        b'event: delta\ndata: {"content":"first"}\n\n',
+        b'event: delta\ndata: {"content":"second"}\n\n',
     ]
 
     async def events():

@@ -233,8 +233,9 @@ async def test_jd_prompt_injection_stays_untrusted_and_planner_reads_snapshot(mo
 
     captured_planner_messages = []
 
-    async def fake_invoke(_llm, messages, *, field):
+    async def fake_invoke(_llm, messages, *, field, stream_field):
         assert field == "question"
+        assert stream_field is False
         captured_planner_messages.extend(messages)
         return SimpleNamespace(
             content=(
